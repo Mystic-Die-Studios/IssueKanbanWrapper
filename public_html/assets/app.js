@@ -64,6 +64,17 @@
   // Sprints are tracked internally (state.board.sprints) and membership is a label.
   function sprintList() { return state.board.sprints || []; }
   function sprintByName(name) { return sprintList().find((s) => s.name === name) || null; }
+  // Defined sprints (with dates) merged with any sprint names discovered on issue
+  // labels — so sprints still appear even if the definitions file isn't present.
+  function allSprints() {
+    const byName = new Map();
+    sprintList().forEach((s) => byName.set(s.name, Object.assign({}, s)));
+    state.board.items.forEach((it) => {
+      const n = itemSprint(it);
+      if (n && !byName.has(n)) byName.set(n, { name: n });
+    });
+    return Array.from(byName.values());
+  }
   function itemStatusName(it) { return (it.fields[cfg().statusField] || {}).name || null; }
   function itemPoints(it) { const f = cfg().pointsField; if (!f) return null; const v = it.fields[f]; return v ? v.number : null; }
   // start/due are computed server-side from issue fields OR project date fields
@@ -138,7 +149,7 @@
     return f(s.startDate) + ' – ' + f(s.endDate);
   }
   function currentSprintName() {
-    const s = sprintList().find((x) => isCurrentSprint(x));
+    const s = allSprints().find((x) => isCurrentSprint(x));
     return s ? s.name : null;
   }
   function sprintProgress(name) {
@@ -157,7 +168,7 @@
     bar.innerHTML = '';
     bar.appendChild(el('span', { class: 'bar-label', text: 'Sprints' }));
 
-    const sprints = sprintList().slice()
+    const sprints = allSprints().slice()
       .sort((a, b) => (b.startDate || '').localeCompare(a.startDate || '')); // newest first
 
     // individual sprints first, then "All sprints" last
@@ -505,7 +516,7 @@
   }
   function buildSprintSelect(currentName) {
     const sel = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })]);
-    sprintList().forEach((s) => sel.appendChild(el('option', { value: s.name, text: s.name + (s.closed ? ' (closed)' : '') })));
+    allSprints().forEach((s) => sel.appendChild(el('option', { value: s.name, text: s.name + (s.closed ? ' (closed)' : '') })));
     sel.value = currentName || '';
     return sel;
   }
