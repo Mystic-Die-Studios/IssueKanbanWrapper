@@ -7,14 +7,30 @@
 declare(strict_types=1);
 
 // ---------------------------------------------------------------------------
+// Never cache dynamic / authenticated responses. On LiteSpeed (Namecheap) the
+// server may otherwise cache the OAuth login redirect, replaying a stale `state`
+// and breaking sign-in. These headers + the public_html/.htaccess rule disable it.
+// ---------------------------------------------------------------------------
+if (!headers_sent()) {
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('X-LiteSpeed-Cache-Control: no-cache');
+}
+
+// ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
 if (session_status() !== PHP_SESSION_ACTIVE) {
     // httpOnly so client JS can never read the cookie; lax is fine for the
-    // OAuth redirect-back flow.
+    // OAuth redirect-back flow. Secure only when actually on HTTPS.
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https')
+        || (($_SERVER['SERVER_PORT'] ?? '') == 443);
     session_set_cookie_params([
+        'path'     => '/',
         'httponly' => true,
         'samesite' => 'Lax',
+        'secure'   => $https,
     ]);
     session_start();
 }
