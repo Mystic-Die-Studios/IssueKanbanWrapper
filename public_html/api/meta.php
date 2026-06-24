@@ -1,0 +1,54 @@
+<?php
+/**
+ * Fetch repo-level metadata for the card edit dropdowns:
+ * labels, open milestones, and assignable users.
+ *
+ * GET ?repo=owner/name
+ */
+declare(strict_types=1);
+require __DIR__ . '/gh.php';
+require_auth();
+
+$repo = $_GET['repo'] ?? '';
+if (!preg_match('#^[^/\s]+/[^/\s]+$#', $repo)) {
+    json_error("Missing or invalid 'repo' (expected owner/name)", 400);
+}
+
+/** GET all pages of a REST list endpoint (caps at 5 pages to stay snappy). */
+function rest_all(string $path): array
+{
+    $out = [];
+    for ($page = 1; $page <= 5; $page++) {
+        $sep = strpos($path, '?') === false ? '?' : '&';
+        [$code, $body] = rest('GET', "{$path}{$sep}per_page=100&page={$page}");
+        if ($code >= 400 || !is_array($body) || count($body) === 0) {
+            break;
+        }
+        $out = array_merge($out, $body);
+        if (count($body) < 100) {
+            break;
+        }
+    }
+    return $out;
+}
+
+$labels = array_map(
+    fn($l) => ['name' => $l['name'], 'color' => $l['color'] ?? '888888'],
+    rest_all("/repos/{$repo}/labels")
+);
+
+$milestones = array_map(
+    fn($m) => ['number' => $m['number'], 'title' => $m['title']],
+    rest_all("/repos/{$repo}/milestones?state=open")
+);
+
+$assignees = array_map(
+    fn($u) => ['login' => $u['login'], 'avatarUrl' => $u['avatar_url'] ?? null],
+    rest_all("/repos/{$repo}/assignees")
+);
+
+json_out([
+    'labels'     => $labels,
+    'milestones' => $milestones,
+    'assignees'  => $assignees,
+]);

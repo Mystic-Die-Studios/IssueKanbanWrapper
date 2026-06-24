@@ -1,0 +1,20 @@
+# Local + production secrets — never commit
+public_html/config.php
+public_html/config.local.php
+
+# Runtime sprint data (keep the dir's .htaccess, ignore the data)
+public_html/data/*.json
+
+# PHP / Composer (not used by default, but just in case)
+vendor/
+
+# Editor / agent / OS cruft
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Session files if a custom save path is ever used
+sessions/
