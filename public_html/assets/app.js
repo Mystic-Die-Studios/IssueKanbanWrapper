@@ -552,11 +552,13 @@
       control,
     ]);
   }
-  // Real issues currently on the board (for relationship dropdown pickers),
-  // excluding the given item and any draft issues.
+  // Real issues currently on the board (for relationship dropdown pickers).
+  // Identify issues by having both a number and a repo (draft issues have
+  // neither); we deliberately don't gate on the `type` string, which isn't
+  // reliable across boards. Excludes the given item and any pull requests.
   function boardIssueOptions(it) {
     return (state.board.items || [])
-      .filter((x) => x.number && x.repo && x.type === 'Issue' && !(x.repo === it.repo && x.number === it.number))
+      .filter((x) => x.number && x.repo && x.type !== 'PullRequest' && !(x.repo === it.repo && x.number === it.number))
       .map((x) => ({ repo: x.repo, number: x.number, title: x.title || '' }))
       .sort((a, b) => (a.repo === b.repo ? a.number - b.number : a.repo.localeCompare(b.repo)));
   }
@@ -728,16 +730,20 @@
       });
     }
 
-    // extra Projects v2 fields (Size as a project field, etc.), excluding ones handled elsewhere
+    // extra Projects v2 fields (Size, etc.). Iterate the board's field
+    // DEFINITIONS — not just this item's values — so empty custom fields are
+    // still editable. Skip built-in/handled fields and any name already shown as
+    // a GitHub Issue field above (avoids a duplicate editor).
     const skip = new Set([cfg().statusField, cfg().pointsField, cfg().startField, cfg().dueField].filter(Boolean));
-    Object.entries(it.fields || {}).forEach(([name, f]) => {
+    Object.entries(state.board.fields || {}).forEach(([name, meta]) => {
       if (skip.has(name)) return;
-      const meta = fieldMeta(name); if (!meta) return;
+      if ((state.board.issueFields || {})[name]) return; // handled as an issue field
       const cur = () => it.fields[name] || {};
-      if (f.type === 'single_select') {
+      const dt = String(meta.dataType || '').toUpperCase();
+      if (dt === 'SINGLE_SELECT') {
         const opts = meta.options || [];
         const sel = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })].concat(opts.map((o) => el('option', { value: o.id, text: o.name }))));
-        sel.value = f.optionId || '';
+        sel.value = cur().optionId || '';
         entries.push({ label: name, control: sel });
         savers.push(mkSaver(
           () => sel.value !== (cur().optionId || ''),
@@ -746,28 +752,29 @@
             const chosen = opts.find((o) => o.id === v); it.fields[name] = v ? { type: 'single_select', name: chosen ? chosen.name : null, optionId: v } : undefined;
           }
         ));
-      } else if (f.type === 'number') {
-        const inp = el('input', { class: 'inp', type: 'number', step: 'any', value: f.number ?? '' });
+      } else if (dt === 'NUMBER') {
+        const inp = el('input', { class: 'inp', type: 'number', step: 'any', value: cur().number ?? '' });
         entries.push({ label: name, control: inp });
         savers.push(mkSaver(
           () => (inp.value === '' ? null : parseFloat(inp.value)) !== (cur().number ?? null),
           async () => { const nv = inp.value === '' ? null : parseFloat(inp.value); await setField(it, name, 'number', inp.value === '' ? null : inp.value); it.fields[name] = nv === null ? undefined : { type: 'number', number: nv }; }
         ));
-      } else if (f.type === 'text') {
-        const inp = el('input', { class: 'inp', type: 'text', value: f.text || '' });
+      } else if (dt === 'TEXT') {
+        const inp = el('input', { class: 'inp', type: 'text', value: cur().text || '' });
         entries.push({ label: name, control: inp });
         savers.push(mkSaver(
           () => (inp.value || '') !== (cur().text || ''),
           async () => { const v = inp.value || null; await setField(it, name, 'text', v); it.fields[name] = v ? { type: 'text', text: v } : undefined; }
         ));
-      } else if (f.type === 'date') {
-        const inp = el('input', { class: 'inp', type: 'date', value: f.date || '' });
+      } else if (dt === 'DATE') {
+        const inp = el('input', { class: 'inp', type: 'date', value: cur().date || '' });
         entries.push({ label: name, control: inp });
         savers.push(mkSaver(
           () => (inp.value || '') !== (cur().date || ''),
           async () => { const v = inp.value || null; await setField(it, name, 'date', v); it.fields[name] = v ? { type: 'date', date: v } : undefined; recomputeDates(it); }
         ));
       }
+      // ITERATION / TITLE / ASSIGNEES / LABELS / MILESTONE / etc. aren't edited here
     });
 
     return entries;
@@ -824,6 +831,7 @@
 
       const controls = readOnly ? null : (() => {
         const opts = boardIssueOptions(it);
+        if (!opts.length) return el('span', { class: 'bar-hint', text: 'No other board issues to link.' });
         const sel = el('select', { class: 'inp rel-input' }, [el('option', { value: '', text: '— pick an issue —' })]
           .concat(opts.map((o) => el('option', { value: o.repo + '#' + o.number, text: '#' + o.number + ' ' + o.title }))));
         const addBtn = el('button', { class: 'btn', text: t.add, onclick: async () => {
