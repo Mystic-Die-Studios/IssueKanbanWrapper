@@ -234,6 +234,24 @@ html, body {
 .pr-draft { color: var(--muted); }
 .create-dyn { display: contents; }
 
+/* ---- relationships (sub-issues + dependencies) ---- */
+.rel-section { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
+.rel-body { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.rel-group { display: flex; flex-direction: column; gap: 5px; }
+.rel-grouplabel { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.rel-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.rel-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 6px 2px 9px; border: 1px solid var(--border); border-radius: 999px; }
+.rel-chip.rel-closed { opacity: .6; }
+.rel-link { color: var(--accent); text-decoration: none; font-size: 13px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rel-link:hover { text-decoration: underline; }
+.rel-x { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1; padding: 2px 4px; border-radius: 4px; }
+.rel-x:hover { color: #fff; background: var(--danger); }
+.rel-x:disabled { opacity: .5; cursor: default; }
+.rel-input { max-width: 200px; }
+
+/* the single Save action sits apart from the form rows */
+.btn-save { margin-top: 14px; }
+
 /* ---- sprint manager ---- */
 .sprint-list { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 18px; }
 .sprint-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;

@@ -160,13 +160,13 @@ function http_request(string $method, string $url, array $headers = [], ?string 
     return [$code, $decoded, (string) $raw];
 }
 
-function gh_headers(string $token, bool $json = true): array
+function gh_headers(string $token, bool $json = true, string $apiVersion = '2022-11-28'): array
 {
     $h = [
         'Authorization: Bearer ' . $token,
         'User-Agent: IssueKanbanWrapper',
         'Accept: application/vnd.github+json',
-        'X-GitHub-Api-Version: 2022-11-28',
+        'X-GitHub-Api-Version: ' . $apiVersion,
     ];
     if ($json) {
         $h[] = 'Content-Type: application/json';
@@ -177,8 +177,12 @@ function gh_headers(string $token, bool $json = true): array
 /**
  * Run a GraphQL query/mutation. Returns the `data` payload.
  * Exits with JSON error on transport or GraphQL errors.
+ *
+ * Pass $soft = true to instead return ['data' => ..., 'errors' => ...] without
+ * exiting on a GraphQL-level error, so the caller can recover. Transport-level
+ * failures (network, non-JSON, 401) still abort regardless.
  */
-function gql(string $query, array $variables = [])
+function gql(string $query, array $variables = [], bool $soft = false)
 {
     $token = require_auth();
     $payload = json_encode(['query' => $query, 'variables' => (object) $variables]);
@@ -199,10 +203,13 @@ function gql(string $query, array $variables = [])
         json_error('GitHub GraphQL error', 502, $body);
     }
     if (!empty($body['errors'])) {
+        if ($soft) {
+            return ['data' => $body['data'] ?? null, 'errors' => $body['errors']];
+        }
         json_error('GitHub GraphQL error', 502, $body['errors']);
     }
 
-    return $body['data'] ?? null;
+    return $soft ? ['data' => $body['data'] ?? null, 'errors' => null] : ($body['data'] ?? null);
 }
 
 /**
@@ -240,17 +247,53 @@ function pv2_update_field(string $projectId, string $itemId, string $fieldId, ?a
 }
 
 /**
+ * Fetch a repo issue via REST. Returns the decoded issue object.
+ * Aborts with a JSON error if the issue can't be found.
+ */
+function gh_issue(string $repo, int $number): array
+{
+    [$code, $issue] = rest('GET', "/repos/{$repo}/issues/{$number}");
+    if ($code >= 400 || !is_array($issue) || empty($issue['id'])) {
+        json_error("Could not find issue {$repo}#{$number}", 404, $issue);
+    }
+    return $issue;
+}
+
+/**
+ * Normalize a GitHub REST issue object to the compact shape the board uses:
+ *   { repo, number, title, url, state, id }
+ * `id` is the numeric database id (what the sub-issue / dependency APIs key on).
+ */
+function gh_issue_brief(array $issue): array
+{
+    $repo = '';
+    if (!empty($issue['repository_url']) && preg_match('#/repos/([^/]+/[^/]+)$#', $issue['repository_url'], $m)) {
+        $repo = $m[1];
+    } elseif (!empty($issue['html_url']) && preg_match('#github\.com/([^/]+/[^/]+)/issues/#', $issue['html_url'], $m)) {
+        $repo = $m[1];
+    }
+    return [
+        'repo'   => $repo,
+        'number' => $issue['number'] ?? null,
+        'title'  => $issue['title']  ?? '',
+        'url'    => $issue['html_url'] ?? null,
+        'state'  => $issue['state']  ?? null,
+        'id'     => $issue['id']     ?? null,
+    ];
+}
+
+/**
  * Run a REST call against api.github.com.
  * $path is the path after the host, e.g. "/repos/owner/repo/issues/12".
  * Returns [status_code, decoded_body].
  */
-function rest(string $method, string $path, ?array $body = null): array
+function rest(string $method, string $path, ?array $body = null, string $apiVersion = '2022-11-28'): array
 {
     $token = require_auth();
     $url = 'https://api.github.com' . $path;
     $json = $body !== null ? json_encode($body) : null;
 
-    [$code, $decoded] = http_request($method, $url, gh_headers($token), $json);
+    [$code, $decoded] = http_request($method, $url, gh_headers($token, true, $apiVersion), $json);
 
     if ($code === 401) {
         unset($_SESSION['gh_token']);

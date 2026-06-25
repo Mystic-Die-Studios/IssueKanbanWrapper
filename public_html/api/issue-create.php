@@ -38,14 +38,30 @@ if ($code >= 400 || empty($issue['node_id'])) {
     json_error('Failed to create issue', 502, $issue);
 }
 
-// Add the new issue to the project board.
+// Add the new issue to the project board. The issue already exists at this
+// point, so if this step fails (commonly: the user can read the board but lacks
+// write access to it) we don't want to abort and orphan the issue. Report the
+// problem instead, so the client can surface it and still refresh.
 $mutation = <<<'GQL'
 mutation($p: ID!, $c: ID!) {
   addProjectV2ItemById(input: { projectId: $p, contentId: $c }) { item { id } }
 }
 GQL;
-$data = gql($mutation, ['p' => config('PROJECT_ID'), 'c' => $issue['node_id']]);
-$itemId = $data['addProjectV2ItemById']['item']['id'] ?? null;
+$res    = gql($mutation, ['p' => config('PROJECT_ID'), 'c' => $issue['node_id']], true);
+$itemId = $res['data']['addProjectV2ItemById']['item']['id'] ?? null;
+
+if ($itemId === null) {
+    json_out([
+        'ok'        => false,
+        'itemId'    => null,
+        'number'    => $issue['number'],
+        'url'       => $issue['html_url'] ?? null,
+        'repo'      => $repo,
+        'issueId'   => $issue['node_id'],
+        'error'     => 'Issue created, but it could not be added to the project board.',
+        'detail'    => $res['errors'],
+    ], 502);
+}
 
 json_out([
     'ok'      => true,

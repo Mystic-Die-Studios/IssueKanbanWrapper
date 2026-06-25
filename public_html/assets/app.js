@@ -47,7 +47,16 @@
       throw new Error('Not authenticated');
     }
     if (!res.ok) {
-      const msg = (body && body.error) ? body.error : ('HTTP ' + res.status);
+      let msg = (body && body.error) ? body.error : ('HTTP ' + res.status);
+      // Surface the underlying detail (e.g. GitHub GraphQL errors) so the real
+      // cause is visible instead of a generic "GitHub GraphQL error".
+      const d = body && body.detail;
+      if (d) {
+        const extra = Array.isArray(d)
+          ? d.map((x) => (x && x.message) ? x.message : JSON.stringify(x)).join('; ')
+          : (typeof d === 'string' ? d : (d.message || JSON.stringify(d)));
+        if (extra && extra !== msg) msg += ': ' + extra;
+      }
       throw new Error(msg);
     }
     return body;
@@ -576,6 +585,7 @@
         await post('/api/pr-link.php', { repo: it.repo, issueNumber: it.number, prNumber: parseInt(n, 10), keyword: 'Closes' });
         prInput.value = '';
         await loadPrs();
+        await refresh(); // re-sync the board after linking a PR
       } catch (e) { showError(e.message); }
       finally { attachBtn.disabled = false; }
     } });
@@ -615,19 +625,24 @@
     it.due = pickDate(map, cfg().dueName, ['due', 'target', 'end', 'deadline']);
   }
 
-  // editable section for GitHub Issue fields + any extra Projects v2 fields
-  function buildEditableFields(it, ifOptions) {
+  // A saver knows whether its control differs from the saved value (dirty) and
+  // how to persist it (apply). apply() self-guards on dirty so the Save loop can
+  // call it unconditionally, and dirty() drives showing/hiding the Save button.
+  function mkSaver(dirty, apply) {
+    return { dirty, apply: async () => { if (dirty()) await apply(); } };
+  }
+
+  // editable section for GitHub Issue fields + any extra Projects v2 fields.
+  // Each control registers a "saver" on the shared list; the modal's single
+  // Save button runs them all, and each one no-ops if its value is unchanged.
+  function buildEditableFields(it, ifOptions, savers) {
     const wrap = el('div', {});
     let any = false;
-    const addRow = (label, control, onSet) => {
+    const addRow = (label, control) => {
       any = true;
-      const setBtn = onSet ? el('button', { class: 'btn', text: 'Set', onclick: async () => {
-        setBtn.disabled = true;
-        try { await onSet(); flash(setBtn, '✓'); } catch (e) { showError(e.message); } finally { setBtn.disabled = false; }
-      } }) : null;
       wrap.appendChild(el('div', { class: 'field-row' }, [
         el('div', { class: 'field-label', text: label }),
-        el('div', { class: 'field-controls' }, [control, setBtn].filter(Boolean)),
+        el('div', { class: 'field-controls' }, [control]),
       ]));
     };
 
@@ -636,26 +651,42 @@
       if (!f.fieldId || !it.issueId) return;
       if (f.type === 'date') {
         const inp = el('input', { class: 'inp', type: 'date', value: f.value || '' });
-        addRow(name, inp, async () => { const v = inp.value || null; await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'date', value: v }); f.value = v; recomputeDates(it); renderBoard(); });
+        addRow(name, inp);
+        savers.push(mkSaver(
+          () => (inp.value || '') !== (f.value || ''),
+          async () => { const v = inp.value || null; await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'date', value: v }); f.value = v; recomputeDates(it); }
+        ));
       } else if (f.type === 'number') {
         const inp = el('input', { class: 'inp', type: 'number', step: 'any', value: f.value ?? '' });
-        addRow(name, inp, async () => { const v = inp.value === '' ? null : inp.value; await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'number', value: v }); f.value = v === null ? null : parseFloat(v); renderBoard(); });
+        addRow(name, inp);
+        savers.push(mkSaver(
+          () => (inp.value === '' ? null : parseFloat(inp.value)) !== (f.value ?? null),
+          async () => { const nv = inp.value === '' ? null : parseFloat(inp.value); await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'number', value: inp.value === '' ? null : inp.value }); f.value = nv; }
+        ));
       } else if (f.type === 'text') {
         const inp = el('input', { class: 'inp', type: 'text', value: f.value || '' });
-        addRow(name, inp, async () => { const v = inp.value || null; await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'text', value: v }); f.value = v; renderBoard(); });
+        addRow(name, inp);
+        savers.push(mkSaver(
+          () => (inp.value || '') !== (f.value || ''),
+          async () => { const v = inp.value || null; await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'text', value: v }); f.value = v; }
+        ));
       } else if (f.type === 'select') {
         const opt = ifOptions[f.fieldId];
         if (opt && opt.options && opt.options.length) {
           const sel = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })].concat(opt.options.map((o) => el('option', { value: o.id, text: o.name }))));
           sel.value = f.optionId || opt.currentOptionId || '';
-          addRow(name, sel, async () => {
-            const v = sel.value || null;
-            await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'select', value: v });
-            const chosen = opt.options.find((o) => o.id === v);
-            f.optionId = v; f.value = chosen ? chosen.name : null; f.color = chosen ? chosen.color : null; renderBoard();
-          });
+          addRow(name, sel);
+          savers.push(mkSaver(
+            () => sel.value !== (f.optionId || opt.currentOptionId || ''),
+            async () => {
+              const v = sel.value || null;
+              await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'select', value: v });
+              const chosen = opt.options.find((o) => o.id === v);
+              f.optionId = v; f.value = chosen ? chosen.name : null; f.color = chosen ? chosen.color : null;
+            }
+          ));
         } else {
-          addRow(name, el('span', { class: 'ro-val', text: f.value || '—' }), null);
+          addRow(name, el('span', { class: 'ro-val', text: f.value || '—' }));
         }
       }
     });
@@ -669,16 +700,35 @@
         const opts = meta.options || [];
         const sel = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })].concat(opts.map((o) => el('option', { value: o.id, text: o.name }))));
         sel.value = f.optionId || '';
-        addRow(name, sel, async () => { const v = sel.value || null; await setField(it, name, 'singleSelect', v); const chosen = opts.find((o) => o.id === v); it.fields[name] = v ? { type: 'single_select', name: chosen ? chosen.name : null, optionId: v } : undefined; renderBoard(); });
+        addRow(name, sel);
+        savers.push(mkSaver(
+          () => sel.value !== (f.optionId || ''),
+          async () => {
+            const v = sel.value || null; await setField(it, name, 'singleSelect', v);
+            const chosen = opts.find((o) => o.id === v); it.fields[name] = v ? { type: 'single_select', name: chosen ? chosen.name : null, optionId: v } : undefined;
+          }
+        ));
       } else if (f.type === 'number') {
         const inp = el('input', { class: 'inp', type: 'number', step: 'any', value: f.number ?? '' });
-        addRow(name, inp, async () => { const v = inp.value === '' ? null : inp.value; await setField(it, name, 'number', v); it.fields[name] = v === null ? undefined : { type: 'number', number: parseFloat(v) }; renderBoard(); });
+        addRow(name, inp);
+        savers.push(mkSaver(
+          () => (inp.value === '' ? null : parseFloat(inp.value)) !== (f.number ?? null),
+          async () => { const nv = inp.value === '' ? null : parseFloat(inp.value); await setField(it, name, 'number', inp.value === '' ? null : inp.value); it.fields[name] = nv === null ? undefined : { type: 'number', number: nv }; }
+        ));
       } else if (f.type === 'text') {
         const inp = el('input', { class: 'inp', type: 'text', value: f.text || '' });
-        addRow(name, inp, async () => { const v = inp.value || null; await setField(it, name, 'text', v); it.fields[name] = v ? { type: 'text', text: v } : undefined; renderBoard(); });
+        addRow(name, inp);
+        savers.push(mkSaver(
+          () => (inp.value || '') !== (f.text || ''),
+          async () => { const v = inp.value || null; await setField(it, name, 'text', v); it.fields[name] = v ? { type: 'text', text: v } : undefined; }
+        ));
       } else if (f.type === 'date') {
         const inp = el('input', { class: 'inp', type: 'date', value: f.date || '' });
-        addRow(name, inp, async () => { const v = inp.value || null; await setField(it, name, 'date', v); it.fields[name] = v ? { type: 'date', date: v } : undefined; recomputeDates(it); renderBoard(); });
+        addRow(name, inp);
+        savers.push(mkSaver(
+          () => (inp.value || '') !== (f.date || ''),
+          async () => { const v = inp.value || null; await setField(it, name, 'date', v); it.fields[name] = v ? { type: 'date', date: v } : undefined; recomputeDates(it); }
+        ));
       }
     });
 
@@ -686,15 +736,106 @@
     return el('div', {}, [el('div', { class: 'field-label', text: 'Fields' }), wrap]);
   }
 
+  // parse an issue reference: "123", "#123", "owner/name#123", or an issue URL.
+  function parseIssueRef(s, defaultRepo) {
+    s = (s || '').trim();
+    let m = s.match(/github\.com\/([^/\s]+\/[^/\s]+)\/issues\/(\d+)/i);
+    if (m) return { repo: m[1], number: parseInt(m[2], 10) };
+    m = s.match(/^([^/\s]+\/[^/\s]+)#(\d+)$/);
+    if (m) return { repo: m[1], number: parseInt(m[2], 10) };
+    m = s.match(/^#?(\d+)$/);
+    if (m) return { repo: defaultRepo, number: parseInt(m[1], 10) };
+    return null;
+  }
+
+  // ---- relationships section (native GitHub sub-issues + dependencies) ----
+  function buildRelationsSection(it) {
+    const TYPES = [
+      { type: 'parent',    label: 'Parent of',  add: 'Set',  placeholder: 'parent #' },
+      { type: 'child',     label: 'Child of',   add: 'Add',  placeholder: 'sub-issue #' },
+      { type: 'blockedBy', label: 'Blocked by', add: 'Add',  placeholder: 'issue #' },
+      { type: 'blocking',  label: 'Blocking',   add: 'Add',  placeholder: 'issue #' },
+    ];
+    const wrap = el('div', { class: 'rel-body' }, [el('span', { class: 'bar-hint', text: 'Loading…' })]);
+
+    async function setRel(type, ref, op) {
+      await post('/api/relation-set.php', {
+        repo: it.repo, number: it.number, targetRepo: ref.repo, targetNumber: ref.number, type, op,
+      });
+      await refresh(); // a relationship change is an edit too; re-sync the board
+    }
+
+    function chip(r, type) {
+      const x = el('button', { class: 'rel-x', text: '✕', title: 'Remove', onclick: async () => {
+        x.disabled = true;
+        try { await setRel(type, r, 'remove'); await load(); }
+        catch (e) { x.disabled = false; showError(e.message); }
+      } });
+      const ref = (r.repo && r.repo !== it.repo ? r.repo : '') + '#' + r.number;
+      return el('span', { class: 'rel-chip' + (r.state === 'closed' ? ' rel-closed' : '') }, [
+        el('a', { class: 'rel-link', href: r.url, target: '_blank', text: (ref + ' ' + (r.title || '')).trim() }),
+        x,
+      ]);
+    }
+
+    function group(t, items) {
+      const list = el('div', { class: 'rel-list' });
+      if (items && items.length) items.forEach((r) => list.appendChild(chip(r, t.type)));
+      else list.appendChild(el('span', { class: 'bar-hint', text: '—' }));
+
+      const input = el('input', { class: 'inp rel-input', type: 'text', placeholder: t.placeholder });
+      const addBtn = el('button', { class: 'btn', text: t.add, onclick: async () => {
+        const ref = parseIssueRef(input.value, it.repo);
+        if (!ref) { showError('Enter an issue number, owner/repo#number, or issue URL'); return; }
+        addBtn.disabled = true;
+        try { await setRel(t.type, ref, 'add'); input.value = ''; await load(); }
+        catch (e) { showError(e.message); }
+        finally { addBtn.disabled = false; }
+      } });
+
+      return el('div', { class: 'rel-group' }, [
+        el('div', { class: 'rel-grouplabel', text: t.label }),
+        list,
+        el('div', { class: 'field-controls' }, [input, addBtn]),
+      ]);
+    }
+
+    async function load() {
+      wrap.innerHTML = '';
+      let data;
+      try { data = await api('/api/relations.php?repo=' + encodeURIComponent(it.repo) + '&number=' + it.number); }
+      catch (e) { wrap.appendChild(el('span', { class: 'bar-hint', text: 'Could not load relationships.' })); return; }
+      const map = {
+        parent: data.parent ? [data.parent] : [],
+        child: data.children || [],
+        blockedBy: data.blockedBy || [],
+        blocking: data.blocking || [],
+      };
+      TYPES.forEach((t) => wrap.appendChild(group(t, map[t.type])));
+      if (data.warnings && data.warnings.length) {
+        wrap.appendChild(el('div', { class: 'bar-hint', text: 'Unavailable on this repo: ' + data.warnings.join(', ') }));
+      }
+    }
+    load();
+
+    return el('div', { class: 'rel-section' }, [el('div', { class: 'field-label', text: 'Relationships' }), wrap]);
+  }
+
   function modalHeader(titleNode) {
     return el('div', { class: 'modal-head' }, [titleNode, el('button', { class: 'btn btn-ghost', text: '✕', onclick: closeModal })]);
   }
 
   // ---- edit modal ----
+  // Every editable control registers a "saver" on this list. The single Save
+  // button at the bottom runs them all; each saver no-ops when its value is
+  // unchanged, so only edited fields hit the API. (Relationships and linked PRs
+  // are discrete add/remove actions and manage themselves outside this flow.)
   function renderModal(it, meta, ifOptions) {
     ifOptions = ifOptions || {};
     const body = $('#modal-body');
     body.innerHTML = '';
+
+    const savers = [];
 
     const header = modalHeader(el('div', {}, [
       it.url ? el('a', { class: 'modal-num', href: it.url, target: '_blank', text: '#' + (it.number || '') }) : null,
@@ -703,144 +844,161 @@
 
     const titleInput = el('input', { class: 'modal-title-input', value: it.title });
     const bodyInput = el('textarea', { class: 'modal-body-input', rows: '6' }, [it.body || '']);
-    const saveIssueBtn = el('button', { class: 'btn btn-primary', text: 'Save title / body', onclick: async () => {
-      try {
-        await post('/api/issue.php', { repo: it.repo, number: it.number, title: titleInput.value, body: bodyInput.value });
-        it.title = titleInput.value; it.body = bodyInput.value;
-        renderBoard(); flash(saveIssueBtn, 'Saved');
-      } catch (e) { showError(e.message); }
-    } });
+    savers.push(mkSaver(
+      () => titleInput.value !== it.title || bodyInput.value !== (it.body || ''),
+      async () => { await post('/api/issue.php', { repo: it.repo, number: it.number, title: titleInput.value, body: bodyInput.value }); it.title = titleInput.value; it.body = bodyInput.value; }
+    ));
 
     // Status
     const statusSel = buildStatusSelect((it.fields[cfg().statusField] || {}).optionId || '');
-    const statusBtn = el('button', { class: 'btn', text: 'Set', onclick: async () => {
-      if (statusSel.value) await moveCard(it.itemId, statusSel.value);
-      flash(statusBtn, '✓');
-    } });
+    savers.push(mkSaver(
+      () => !!statusSel.value && statusSel.value !== ((it.fields[cfg().statusField] || {}).optionId || ''),
+      async () => { await moveCard(it.itemId, statusSel.value); }
+    ));
 
     // Story Points (or a create-field prompt if the board has no points field)
-    let pointsControls;
+    let pointsRow;
     if (cfg().pointsField) {
       const pointsInput = el('input', { class: 'inp', type: 'number', step: '0.5', value: itemPoints(it) ?? '' });
-      const pointsBtn = el('button', { class: 'btn', text: 'Set', onclick: async () => {
-        try {
-          const v = pointsInput.value === '' ? null : pointsInput.value;
-          await setField(it, cfg().pointsField, 'number', v);
-          it.fields[cfg().pointsField] = v == null ? undefined : { type: 'number', number: parseFloat(v) };
-          renderBoard(); renderSprintBar(); flash(pointsBtn, '✓');
-        } catch (e) { showError(e.message); }
-      } });
-      pointsControls = [pointsInput, pointsBtn];
+      savers.push(mkSaver(
+        () => (pointsInput.value === '' ? null : parseFloat(pointsInput.value)) !== itemPoints(it),
+        async () => {
+          const nv = pointsInput.value === '' ? null : parseFloat(pointsInput.value);
+          await setField(it, cfg().pointsField, 'number', pointsInput.value === '' ? null : pointsInput.value);
+          it.fields[cfg().pointsField] = nv == null ? undefined : { type: 'number', number: nv };
+        }
+      ));
+      pointsRow = fieldRow('Story Points', pointsInput);
     } else {
       const createBtn = el('button', { class: 'btn', text: `Create "${cfg().pointsName}" field`, onclick: async () => {
         createBtn.disabled = true; createBtn.textContent = 'Creating…';
         try { await post('/api/create-field.php', { name: cfg().pointsName, dataType: 'NUMBER' }); closeModal(); await refresh(); }
         catch (e) { createBtn.disabled = false; createBtn.textContent = `Create "${cfg().pointsName}" field`; showError(e.message); }
       } });
-      pointsControls = [el('span', { class: 'bar-hint', text: 'No points field on this board.' }), createBtn];
+      pointsRow = fieldRow('Story Points', el('span', { class: 'bar-hint', text: 'No points field on this board.' }), createBtn);
     }
 
     // Start date (optional Projects v2 Date field)
-    let startControls = null;
+    let startRow = null;
     if (cfg().startField) {
       const startInput = el('input', { class: 'inp', type: 'date', value: itemStart(it) || '' });
-      const startBtn = el('button', { class: 'btn', text: 'Set', onclick: async () => {
-        try {
+      savers.push(mkSaver(
+        () => (startInput.value || '') !== (itemStart(it) || ''),
+        async () => {
           const v = startInput.value === '' ? null : startInput.value;
           await setField(it, cfg().startField, 'date', v);
           it.fields[cfg().startField] = v == null ? undefined : { type: 'date', date: v };
-          it.start = v; renderBoard(); flash(startBtn, '✓');
-        } catch (e) { showError(e.message); }
-      } });
-      startControls = [startInput, startBtn];
+          it.start = v;
+        }
+      ));
+      startRow = fieldRow('Start date', startInput);
     }
 
     // Due date — only editable here when it's a Projects v2 date field.
-    // (Issue-field dates are shown read-only in the Fields section below.)
-    let dueControls = null;
+    // (Issue-field dates are shown in the Fields section below.)
+    let dueRow = null;
     if (cfg().dueField) {
       const dueInput = el('input', { class: 'inp', type: 'date', value: itemDue(it) || '' });
-      const dueBtn = el('button', { class: 'btn', text: 'Set', onclick: async () => {
-        try {
+      savers.push(mkSaver(
+        () => (dueInput.value || '') !== (itemDue(it) || ''),
+        async () => {
           const v = dueInput.value === '' ? null : dueInput.value;
           await setField(it, cfg().dueField, 'date', v);
           it.fields[cfg().dueField] = v == null ? undefined : { type: 'date', date: v };
-          it.due = v; renderBoard(); flash(dueBtn, '✓');
-        } catch (e) { showError(e.message); }
-      } });
-      dueControls = [dueInput, dueBtn];
+          it.due = v;
+        }
+      ));
+      dueRow = fieldRow('Due date', dueInput);
     }
 
     // Sprint (writes the sprint label)
     const sprintSel = buildSprintSelect(itemSprint(it) || '');
-    const sprintBtn = el('button', { class: 'btn', text: 'Set', onclick: async () => {
-      try {
-        const v = sprintSel.value || null;
-        const res = await post('/api/sprint-assign.php', { repo: it.repo, number: it.number, labels: it.labels.map((l) => l.name), sprint: v });
+    savers.push(mkSaver(
+      () => (sprintSel.value || '') !== (itemSprint(it) || ''),
+      async () => {
+        const v = sprintSel.value || '';
+        const res = await post('/api/sprint-assign.php', { repo: it.repo, number: it.number, labels: it.labels.map((l) => l.name), sprint: v || null });
         const names = res.labels || [];
         const known = new Map(it.labels.map((l) => [l.name, l]));
         it.labels = names.map((n) => known.get(n) || { name: n, color: '5319e7' });
-        it.sprint = v;
-        renderBoard(); renderSprintBar(); renderFilterBar(); flash(sprintBtn, '✓');
-      } catch (e) { showError(e.message); }
-    } });
+        it.sprint = v || null;
+      }
+    ));
 
     // Milestone
     const msSel = buildMilestoneSelect(meta.milestones, it.milestone);
-    const msBtn = el('button', { class: 'btn', text: 'Set', onclick: async () => {
-      const v = msSel.value === '' ? null : parseInt(msSel.value, 10);
-      try {
+    savers.push(mkSaver(
+      () => (msSel.value === '' ? null : parseInt(msSel.value, 10)) !== (it.milestone ? it.milestone.number : null),
+      async () => {
+        const v = msSel.value === '' ? null : parseInt(msSel.value, 10);
         await post('/api/milestone.php', { repo: it.repo, number: it.number, milestone: v });
         const chosen = meta.milestones.find((m) => m.number === v);
         it.milestone = v == null ? null : { number: v, title: chosen ? chosen.title : ('#' + v) };
-        renderBoard(); flash(msBtn, '✓');
-      } catch (e) { showError(e.message); }
-    } });
+      }
+    ));
 
-    // Labels (Teams + Labels split)
+    // Labels (Teams + Labels split); sprint labels are managed via the Sprint field.
     const labelSrc = meta.labels.length ? meta.labels : it.labels;
     const labelSecs = buildLabelSections(labelSrc, new Set(it.labels.map((l) => l.name)));
-    const labelsBtn = el('button', { class: 'btn', text: 'Save labels', onclick: async () => {
+    const labelsDirty = () => {
+      const cur = it.labels.filter((l) => !isSprintLabel(l.name)).map((l) => l.name).sort();
+      return JSON.stringify(cur) !== JSON.stringify(labelSecs.getChosen().slice().sort());
+    };
+    savers.push(mkSaver(labelsDirty, async () => {
       const chosen = labelSecs.getChosen();
       const sprintLabels = it.labels.filter((l) => isSprintLabel(l.name)); // preserve sprint label
       const finalNames = chosen.concat(sprintLabels.map((l) => l.name));
-      try {
-        await post('/api/labels.php', { repo: it.repo, number: it.number, labels: finalNames });
-        it.labels = labelSrc.filter((l) => chosen.includes(l.name)).concat(sprintLabels);
-        renderBoard(); renderFilterBar(); flash(labelsBtn, 'Saved');
-      } catch (e) { showError(e.message); }
-    } });
+      await post('/api/labels.php', { repo: it.repo, number: it.number, labels: finalNames });
+      it.labels = labelSrc.filter((l) => chosen.includes(l.name)).concat(sprintLabels);
+    }));
 
     // Assignees
     const asgSrc = meta.assignees.length ? meta.assignees : it.assignees;
     const asgSecs = buildAssigneeSection(asgSrc, new Set(it.assignees.map((a) => a.login)));
-    const asgBtn = el('button', { class: 'btn', text: 'Save assignees', onclick: async () => {
+    const asgDirty = () => JSON.stringify(it.assignees.map((a) => a.login).sort()) !== JSON.stringify(asgSecs.getChosen().slice().sort());
+    savers.push(mkSaver(asgDirty, async () => {
       const chosen = asgSecs.getChosen();
+      await post('/api/assignees.php', { repo: it.repo, number: it.number, assignees: chosen });
+      it.assignees = asgSrc.filter((u) => chosen.includes(u.login));
+    }));
+
+    // One Save button, shown only while there are unsaved changes.
+    const saveBtn = el('button', { class: 'btn btn-primary btn-save hidden', text: 'Save', onclick: async () => {
+      saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
       try {
-        await post('/api/assignees.php', { repo: it.repo, number: it.number, assignees: chosen });
-        it.assignees = asgSrc.filter((u) => chosen.includes(u.login));
-        renderBoard(); flash(asgBtn, 'Saved');
-      } catch (e) { showError(e.message); }
+        for (const s of savers) await s.apply();
+        await refresh(); // re-fetch the board so the viewer reflects server truth
+        saveBtn.textContent = 'Saved ✓';
+        setTimeout(() => { saveBtn.disabled = false; saveBtn.textContent = 'Save'; refreshSaveBtn(); }, 1200);
+      } catch (e) {
+        saveBtn.disabled = false; saveBtn.textContent = 'Save'; refreshSaveBtn();
+        showError(e.message);
+      }
     } });
+    // Show Save whenever any control differs from its saved value. Field inputs,
+    // selects and checkboxes all bubble input/change, so one delegated listener
+    // on the modal body covers the whole form.
+    const refreshSaveBtn = () => { saveBtn.classList.toggle('hidden', !savers.some((s) => s.dirty())); };
+    body.addEventListener('input', refreshSaveBtn);
+    body.addEventListener('change', refreshSaveBtn);
 
     body.append(...[
       header,
       titleInput,
-      fieldRow('Status', statusSel, statusBtn),
-      fieldRow('Story Points', ...pointsControls),
-      startControls ? fieldRow('Start date', ...startControls) : null,
-      dueControls ? fieldRow('Due date', ...dueControls) : null,
-      fieldRow('Sprint', sprintSel, sprintBtn),
-      fieldRow('Milestone', msSel, msBtn),
-      buildEditableFields(it, ifOptions),
+      fieldRow('Status', statusSel),
+      pointsRow,
+      startRow,
+      dueRow,
+      fieldRow('Sprint', sprintSel),
+      fieldRow('Milestone', msSel),
+      buildEditableFields(it, ifOptions, savers),
       el('div', { class: 'field-row' }, [el('div', { class: 'field-label', text: 'Labels' }), labelSecs.wrap]),
-      labelsBtn,
       el('div', { class: 'field-row' }, [el('div', { class: 'field-label', text: 'Assignees' }), asgSecs.wrap]),
-      asgBtn,
+      buildRelationsSection(it),
       buildPrSection(it),
       el('div', { class: 'field-label', text: 'Description' }),
       bodyInput,
-      saveIssueBtn,
+      saveBtn,
     ].filter(Boolean));
   }
 
@@ -895,11 +1053,25 @@
       if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) { showError('Choose a repo (owner/name)'); return; }
       if (!titleInput.value.trim()) { showError('Title is required'); return; }
       createBtn.disabled = true; createBtn.textContent = 'Creating…';
+      const labels = labelSecs ? labelSecs.getChosen() : [];
+      const assignees = asgSecs ? asgSecs.getChosen() : [];
+      const milestone = (msSel && msSel.value) ? parseInt(msSel.value, 10) : null;
+
+      // The issue is created first; only then is it added to the board and have
+      // its fields set. If creation itself fails the issue may still exist on
+      // GitHub, so we surface the error but always refresh + close so the board
+      // reflects reality and the user isn't stuck on a stale modal.
+      let res;
       try {
-        const labels = labelSecs ? labelSecs.getChosen() : [];
-        const assignees = asgSecs ? asgSecs.getChosen() : [];
-        const milestone = (msSel && msSel.value) ? parseInt(msSel.value, 10) : null;
-        const res = await post('/api/issue-create.php', { repo, title: titleInput.value.trim(), body: bodyInput.value, labels, assignees, milestone });
+        res = await post('/api/issue-create.php', { repo, title: titleInput.value.trim(), body: bodyInput.value, labels, assignees, milestone });
+      } catch (e) {
+        showError(e.message);
+        closeModal();
+        await refresh();
+        return;
+      }
+
+      try {
         if (statusSel.value) {
           const sf = fieldMeta(cfg().statusField);
           if (sf) await post('/api/move.php', { itemId: res.itemId, fieldId: sf.id, optionId: statusSel.value });
@@ -919,9 +1091,12 @@
         if (sprintSel.value) {
           await post('/api/sprint-assign.php', { repo, number: res.number, labels, sprint: sprintSel.value });
         }
-        closeModal();
-        await refresh();
-      } catch (e) { createBtn.disabled = false; createBtn.textContent = 'Create issue'; showError(e.message); }
+      } catch (e) {
+        // Issue is already created and on the board; a field-setting step failed.
+        showError('Issue created, but some fields could not be set: ' + e.message);
+      }
+      closeModal();
+      await refresh();
     } });
 
     body.append(...[
