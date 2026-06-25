@@ -1148,10 +1148,12 @@
 
     const backBtn = el('button', { class: 'btn btn-ghost', text: '← Back', title: 'Back to view',
       onclick: () => renderViewModal(it, meta) });
-    const delBtn = it.issueId ? el('button', { class: 'btn btn-ghost btn-danger', text: '🗑 Delete', title: 'Permanently delete this issue', onclick: async () => {
-      if (!confirm('Permanently delete issue #' + it.number + ' on GitHub? This cannot be undone.')) return;
+    const delBtn = (it.issueId || it.itemId) ? el('button', { class: 'btn btn-ghost btn-danger', text: '🗑 Delete', title: 'Delete this card', onclick: async () => {
+      const isDraft = it.type === 'DraftIssue';
+      const label = it.number ? ('issue #' + it.number + ' on GitHub') : ('draft "' + (it.title || '') + '"');
+      if (!confirm('Permanently delete ' + label + '? This cannot be undone.')) return;
       delBtn.disabled = true; delBtn.textContent = 'Deleting…';
-      try { await post('/api/issue-delete.php', { issueId: it.issueId }); closeModal(); await refresh(); }
+      try { await post('/api/issue-delete.php', { issueId: it.issueId, itemId: it.itemId, type: it.type }); closeModal(); await refresh(); }
       catch (e) { delBtn.disabled = false; delBtn.textContent = '🗑 Delete'; showError(e.message); }
     } }) : null;
     const header = modalHeader(el('div', {}, [
