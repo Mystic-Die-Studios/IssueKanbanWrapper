@@ -74,14 +74,41 @@ function fetch_fields(string $projectId): array
 
 /**
  * Fetch all board items (paginated). Returns a normalized array of items.
+ *
+ * Sub-issue (parent) and dependency (blocked-by / blocking) fields are newer
+ * GraphQL schema additions that may require preview feature headers and could be
+ * unavailable. To avoid ever breaking the board, we try progressively richer
+ * queries and fall back: parent+dependencies -> parent only -> base.
  */
 function fetch_items(string $projectId): array
 {
-    $query = <<<'GQL'
-    query($id: ID!, $after: String) {
-      node(id: $id) {
+    $levels = [
+        ['feat' => 'sub_issues,issue_dependencies',
+         'rel'  => 'parent { number repository { nameWithOwner } } blockedBy(first: 1) { totalCount } blocking(first: 1) { totalCount }'],
+        ['feat' => 'sub_issues',
+         'rel'  => 'parent { number repository { nameWithOwner } }'],
+        ['feat' => null, 'rel' => ''],
+    ];
+    foreach ($levels as $lvl) {
+        $items = fetch_items_try($projectId, $lvl['rel'], $lvl['feat']);
+        if ($items !== null) {
+            return $items;
+        }
+    }
+    return [];
+}
+
+/**
+ * Run the paginated items query at one enrichment level. Returns the normalized
+ * items, or null if any page errors (so the caller can fall back).
+ */
+function fetch_items_try(string $projectId, string $rel, ?string $features): ?array
+{
+    $query = <<<GQL
+    query(\$id: ID!, \$after: String) {
+      node(id: \$id) {
         ... on ProjectV2 {
-          items(first: 50, after: $after) {
+          items(first: 50, after: \$after) {
             pageInfo { hasNextPage endCursor }
             nodes {
               id
@@ -94,6 +121,7 @@ function fetch_items(string $projectId): array
                   milestone { title number }
                   assignees(first: 10) { nodes { login avatarUrl } }
                   labels(first: 20) { nodes { name color } }
+                  {$rel}
                   issueFieldValues(first: 30) {
                     nodes {
                       __typename
@@ -136,10 +164,13 @@ function fetch_items(string $projectId): array
     $items = [];
     $after = null;
     do {
-        $data = gql($query, ['id' => $projectId, 'after' => $after]);
-        $conn = $data['node']['items'] ?? null;
+        $res = gql($query, ['id' => $projectId, 'after' => $after], true, $features);
+        if (!empty($res['errors']) || empty($res['data'])) {
+            return null;
+        }
+        $conn = $res['data']['node']['items'] ?? null;
         if (!$conn) {
-            break;
+            return null;
         }
         foreach ($conn['nodes'] as $node) {
             $items[] = normalize_item($node);
@@ -232,6 +263,12 @@ function normalize_item(array $node): array
         'labels'      => $labels,
         'fields'      => $fields,           // Projects v2 field values, keyed by field name
         'issueFields' => $issueFields,      // GitHub Issue fields, keyed by field name
+        'parent'      => isset($content['parent']) && $content['parent']
+                        ? ['number' => $content['parent']['number'] ?? null,
+                           'repo'   => $content['parent']['repository']['nameWithOwner'] ?? null]
+                        : null,
+        'blockedBy'   => (int) ($content['blockedBy']['totalCount'] ?? 0),  // issues blocking this one
+        'blocking'    => (int) ($content['blocking']['totalCount'] ?? 0),   // issues this one blocks
     ];
 }
 

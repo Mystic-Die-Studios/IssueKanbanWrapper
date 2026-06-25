@@ -96,6 +96,9 @@
   function issueColor(name) { if (!name) return null; const h = ISSUE_COLORS[String(name).toUpperCase()]; return h ? '#' + h : null; }
   function itemSprint(it) { return it.sprint || null; } // sprint name (from label) or null
   function isDone(it) { return (itemStatusName(it) || '').toLowerCase() === (cfg().statusDone || '').toLowerCase(); }
+  // stable "owner/repo#number" key for matching parent/child relationships
+  function itemKey(it) { return (it.repo || '') + '#' + (it.number != null ? it.number : ''); }
+  function parentKey(it) { return it.parent && it.parent.number != null ? (it.parent.repo || it.repo) + '#' + it.parent.number : null; }
 
   // team-label helpers (a label is a "team" if it starts with the configured prefix)
   function teamPrefix() { return cfg().teamPrefix || ''; }
@@ -374,7 +377,31 @@
   function renderColumn(col) {
     const pts = col.items.reduce((s, it) => s + (itemPoints(it) || 0), 0);
     const body = el('div', { class: 'col-body', 'data-option': col.optionId || '' });
-    col.items.forEach((it) => body.appendChild(renderCard(it)));
+
+    // Nest sub-issues under their parent when both sit in this column; children
+    // whose parent is elsewhere render at the top level (with a "↳ #parent" hint).
+    const inCol = new Set(col.items.map(itemKey));
+    const childrenOf = new Map();
+    const roots = [];
+    col.items.forEach((it) => {
+      const pk = parentKey(it);
+      if (pk && pk !== itemKey(it) && inCol.has(pk)) {
+        if (!childrenOf.has(pk)) childrenOf.set(pk, []);
+        childrenOf.get(pk).push(it);
+      } else {
+        roots.push(it);
+      }
+    });
+    const placed = new Set();
+    const place = (it, depth) => {
+      const k = itemKey(it);
+      if (placed.has(k)) return; // guard against relationship cycles
+      placed.add(k);
+      body.appendChild(renderCard(it, depth));
+      (childrenOf.get(k) || []).forEach((c) => place(c, depth + 1));
+    };
+    roots.forEach((it) => place(it, 0));
+    col.items.forEach((it) => { if (!placed.has(itemKey(it))) place(it, 0); }); // any left by a cycle
 
     body.addEventListener('dragover', (e) => { e.preventDefault(); body.classList.add('drag-over'); });
     body.addEventListener('dragleave', () => body.classList.remove('drag-over'));
@@ -394,8 +421,9 @@
     ]);
   }
 
-  function renderCard(it) {
-    const card = el('div', { class: 'card', draggable: 'true' });
+  function renderCard(it, depth = 0) {
+    const card = el('div', { class: 'card' + (depth > 0 ? ' card-child' : ''), draggable: 'true' });
+    if (depth > 0) card.style.marginLeft = (depth * 18) + 'px';
     card.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('text/itemId', it.itemId);
       card.classList.add('dragging');
@@ -409,6 +437,9 @@
     const overdue = due && !isDone(it) && due < new Date().toISOString().slice(0, 10);
     const meta = el('div', { class: 'card-meta' }, [
       it.number ? el('span', { class: 'card-num', text: '#' + it.number }) : null,
+      (it.parent && it.parent.number != null) ? el('span', { class: 'parent-badge', title: 'Sub-issue of #' + it.parent.number, text: '↳ #' + it.parent.number }) : null,
+      it.blockedBy > 0 ? el('span', { class: 'dep-badge dep-blocked', title: 'Blocked by ' + it.blockedBy + ' issue(s)', text: '⛔ blocked' }) : null,
+      it.blocking > 0 ? el('span', { class: 'dep-badge dep-blocking', title: 'Blocking ' + it.blocking + ' issue(s)', text: '⚠ blocking' + (it.blocking > 1 ? ' ' + it.blocking : '') }) : null,
       pts != null ? el('span', { class: 'pts-badge', text: pts + ' pts' }) : null,
       sprint ? el('span', { class: 'sprint-badge', text: '⏱ ' + sprint }) : null,
       due ? el('span', { class: 'due-badge' + (overdue ? ' overdue' : ''), text: '📅 ' + fmtDue(due) }) : null,

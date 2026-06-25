@@ -160,7 +160,7 @@ function http_request(string $method, string $url, array $headers = [], ?string 
     return [$code, $decoded, (string) $raw];
 }
 
-function gh_headers(string $token, bool $json = true, string $apiVersion = '2022-11-28'): array
+function gh_headers(string $token, bool $json = true, string $apiVersion = '2022-11-28', ?string $features = null): array
 {
     $h = [
         'Authorization: Bearer ' . $token,
@@ -168,6 +168,10 @@ function gh_headers(string $token, bool $json = true, string $apiVersion = '2022
         'Accept: application/vnd.github+json',
         'X-GitHub-Api-Version: ' . $apiVersion,
     ];
+    if ($features) {
+        // Opt into preview GraphQL schema features (e.g. sub_issues).
+        $h[] = 'GraphQL-Features: ' . $features;
+    }
     if ($json) {
         $h[] = 'Content-Type: application/json';
     }
@@ -182,7 +186,7 @@ function gh_headers(string $token, bool $json = true, string $apiVersion = '2022
  * exiting on a GraphQL-level error, so the caller can recover. Transport-level
  * failures (network, non-JSON, 401) still abort regardless.
  */
-function gql(string $query, array $variables = [], bool $soft = false)
+function gql(string $query, array $variables = [], bool $soft = false, ?string $features = null)
 {
     $token = require_auth();
     $payload = json_encode(['query' => $query, 'variables' => (object) $variables]);
@@ -190,7 +194,7 @@ function gql(string $query, array $variables = [], bool $soft = false)
     [$code, $body] = http_request(
         'POST',
         'https://api.github.com/graphql',
-        gh_headers($token),
+        gh_headers($token, true, '2022-11-28', $features),
         $payload
     );
 
@@ -200,6 +204,10 @@ function gql(string $query, array $variables = [], bool $soft = false)
         json_error('GitHub authentication expired. Please log in again.', 401);
     }
     if ($code >= 400 || !is_array($body)) {
+        if ($soft) {
+            $errs = is_array($body) ? ($body['errors'] ?? [$body]) : [['message' => 'HTTP ' . $code]];
+            return ['data' => null, 'errors' => $errs];
+        }
         json_error('GitHub GraphQL error', 502, $body);
     }
     if (!empty($body['errors'])) {

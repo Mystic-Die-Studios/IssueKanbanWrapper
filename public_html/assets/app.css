@@ -139,6 +139,13 @@ html, body {
 .due-badge { background: var(--panel); border: 1px solid var(--border); color: var(--muted); border-radius: 999px; padding: 1px 8px; font-size: 11px; }
 .due-badge.overdue { background: var(--danger); border-color: var(--danger); color: #fff; }
 .ms-badge { color: var(--muted); font-size: 11px; }
+.parent-badge { color: var(--muted); font-size: 11px; }
+.dep-badge { border-radius: 999px; padding: 1px 8px; font-size: 11px; font-weight: 600; }
+.dep-blocked { background: var(--danger); color: #fff; }
+.dep-blocking { background: #9e6a03; color: #fff; }
+
+/* a sub-issue nested under its parent: indent + a connector down the left edge */
+.card-child { position: relative; border-left: 3px solid var(--accent); }
 .card-labels { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
 .label { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid; }
 .label-team { color: #fff; font-weight: 600; }
