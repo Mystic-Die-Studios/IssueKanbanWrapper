@@ -273,9 +273,23 @@ function fetch_board(): array
         $dueName = resolve_field_name($fields, config('FIELD_DUE'), [], 'DATE');
     }
 
+    // Aggregate the GitHub *Issue* field definitions (id + type) seen across all
+    // items, keyed by name. The issue-field id is stable per repo, so this gives
+    // us the id even for issues where the field is currently empty — which is
+    // what lets the client write issue-backed date fields (Start/Target date)
+    // via setIssueFieldValue instead of the project mutation, which GitHub
+    // rejects for issue fields.
+    $issueFieldDefs = [];
+
     // Derive sprint (from label) and start/due dates (from issue fields or
     // project date fields) for each item.
     foreach ($items as &$it) {
+        foreach (($it['issueFields'] ?? []) as $n => $f) {
+            if (!isset($issueFieldDefs[$n]) && !empty($f['fieldId'])) {
+                $issueFieldDefs[$n] = ['id' => $f['fieldId'], 'type' => $f['type'] ?? null];
+            }
+        }
+
         $it['sprint'] = null;
         foreach ($it['labels'] as $l) {
             if (strpos($l['name'], $prefix) === 0) {
@@ -312,9 +326,10 @@ function fetch_board(): array
             'projectTitle'  => $info['title'],
             'projectUrl'    => $info['url'],
         ],
-        'fields'  => $fields,
-        'items'   => $items,
-        'sprints' => sprints_get($projectId),
+        'fields'      => $fields,
+        'issueFields' => $issueFieldDefs,   // name => {id, type} for GitHub Issue fields
+        'items'       => $items,
+        'sprints'     => sprints_get($projectId),
     ];
 }
 

@@ -90,6 +90,7 @@
   function itemStart(it) { return it.start || null; }
   function itemDue(it) { return it.due || null; }
   function fmtDue(iso) { try { return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); } catch (e) { return iso; } }
+  function fmtDateTime(iso) { try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); } catch (e) { return iso; } }
   // GitHub IssueFieldSingleSelectOptionColor enum -> hex
   const ISSUE_COLORS = { GRAY: '6e7681', BLUE: '1f6feb', GREEN: '238636', YELLOW: '9e6a03', ORANGE: 'bc4c00', RED: 'cf222e', PINK: 'bf3989', PURPLE: '8250df' };
   function issueColor(name) { if (!name) return null; const h = ISSUE_COLORS[String(name).toUpperCase()]; return h ? '#' + h : null; }
@@ -481,6 +482,38 @@
     await post('/api/field.php', { itemId: item.itemId, fieldId: f.id, kind, value });
   }
 
+  // Write a date to the correct GitHub mutation. A GitHub *Issue* field must use
+  // setIssueFieldValue (issue-field-set.php); a Projects v2 field uses
+  // updateProjectV2ItemFieldValue (field.php). GitHub rejects the project
+  // mutation for issue fields ("Issue field values cannot be updated using the
+  // updateProjectV2ItemFieldValue mutation"), so we route by field kind. The
+  // board exposes issue-field ids (stable per repo) in state.board.issueFields,
+  // which works even when this issue's value is currently empty.
+  // Returns 'issue' | 'project' | null (no such field).
+  async function writeDate(itemId, issueId, fieldName, v) {
+    const iss = (state.board.issueFields || {})[fieldName];
+    if (iss && iss.id && issueId) {
+      await post('/api/issue-field-set.php', { issueId, fieldId: iss.id, kind: 'date', value: v });
+      return 'issue';
+    }
+    const pf = fieldMeta(fieldName);
+    if (pf) { await post('/api/field.php', { itemId, fieldId: pf.id, kind: 'date', value: v }); return 'project'; }
+    return null;
+  }
+
+  // Edit-modal helper: write a date and keep the in-memory item in sync.
+  async function setDateField(item, fieldName, v) {
+    const where = await writeDate(item.itemId, item.issueId, fieldName, v);
+    if (where === 'issue') {
+      const iss = state.board.issueFields[fieldName];
+      item.issueFields = item.issueFields || {};
+      item.issueFields[fieldName] = { type: 'date', value: v, fieldId: iss.id };
+    } else if (where === 'project') {
+      item.fields[fieldName] = v == null ? undefined : { type: 'date', date: v };
+    }
+    recomputeDates(item);
+  }
+
   // ---- card modal (full read/write) ----
   async function openCardModal(it) {
     const modal = $('#modal');
@@ -498,7 +531,7 @@
         .catch(() => {})
     );
     await Promise.all(jobs);
-    renderModal(it, meta, ifOptions);
+    renderViewModal(it, meta, ifOptions);
   }
 
   async function loadMeta(repo) {
@@ -574,7 +607,7 @@
   }
 
   // ---- linked pull requests section ----
-  function buildPrSection(it) {
+  function buildPrSection(it, readOnly) {
     const list = el('div', { class: 'pr-list' }, [el('span', { class: 'bar-hint', text: 'Loading…' })]);
     const prInput = el('input', { class: 'inp', type: 'number', placeholder: 'PR #', style: 'width:90px' });
     const attachBtn = el('button', { class: 'btn', text: 'Attach (Closes)', onclick: async () => {
@@ -607,8 +640,8 @@
     return el('div', { class: 'pr-section' }, [
       el('div', { class: 'field-label', text: 'Pull requests' }),
       list,
-      el('div', { class: 'field-controls' }, [prInput, attachBtn]),
-    ]);
+      readOnly ? null : el('div', { class: 'field-controls' }, [prInput, attachBtn]),
+    ].filter(Boolean));
   }
 
   // recompute item.start/item.due locally after a date edit (mirrors board.php)
@@ -749,7 +782,7 @@
   }
 
   // ---- relationships section (native GitHub sub-issues + dependencies) ----
-  function buildRelationsSection(it) {
+  function buildRelationsSection(it, readOnly) {
     const TYPES = [
       { type: 'parent',    label: 'Parent of',  add: 'Set',  placeholder: 'parent #' },
       { type: 'child',     label: 'Child of',   add: 'Add',  placeholder: 'sub-issue #' },
@@ -766,7 +799,7 @@
     }
 
     function chip(r, type) {
-      const x = el('button', { class: 'rel-x', text: '✕', title: 'Remove', onclick: async () => {
+      const x = readOnly ? null : el('button', { class: 'rel-x', text: '✕', title: 'Remove', onclick: async () => {
         x.disabled = true;
         try { await setRel(type, r, 'remove'); await load(); }
         catch (e) { x.disabled = false; showError(e.message); }
@@ -775,29 +808,34 @@
       return el('span', { class: 'rel-chip' + (r.state === 'closed' ? ' rel-closed' : '') }, [
         el('a', { class: 'rel-link', href: r.url, target: '_blank', text: (ref + ' ' + (r.title || '')).trim() }),
         x,
-      ]);
+      ].filter(Boolean));
     }
 
     function group(t, items) {
+      const has = items && items.length;
+      if (readOnly && !has) return null; // hide empty groups in the read-only view
       const list = el('div', { class: 'rel-list' });
-      if (items && items.length) items.forEach((r) => list.appendChild(chip(r, t.type)));
+      if (has) items.forEach((r) => list.appendChild(chip(r, t.type)));
       else list.appendChild(el('span', { class: 'bar-hint', text: '—' }));
 
-      const input = el('input', { class: 'inp rel-input', type: 'text', placeholder: t.placeholder });
-      const addBtn = el('button', { class: 'btn', text: t.add, onclick: async () => {
-        const ref = parseIssueRef(input.value, it.repo);
-        if (!ref) { showError('Enter an issue number, owner/repo#number, or issue URL'); return; }
-        addBtn.disabled = true;
-        try { await setRel(t.type, ref, 'add'); input.value = ''; await load(); }
-        catch (e) { showError(e.message); }
-        finally { addBtn.disabled = false; }
-      } });
+      const controls = readOnly ? null : (() => {
+        const input = el('input', { class: 'inp rel-input', type: 'text', placeholder: t.placeholder });
+        const addBtn = el('button', { class: 'btn', text: t.add, onclick: async () => {
+          const ref = parseIssueRef(input.value, it.repo);
+          if (!ref) { showError('Enter an issue number, owner/repo#number, or issue URL'); return; }
+          addBtn.disabled = true;
+          try { await setRel(t.type, ref, 'add'); input.value = ''; await load(); }
+          catch (e) { showError(e.message); }
+          finally { addBtn.disabled = false; }
+        } });
+        return el('div', { class: 'field-controls' }, [input, addBtn]);
+      })();
 
       return el('div', { class: 'rel-group' }, [
         el('div', { class: 'rel-grouplabel', text: t.label }),
         list,
-        el('div', { class: 'field-controls' }, [input, addBtn]),
-      ]);
+        controls,
+      ].filter(Boolean));
     }
 
     async function load() {
@@ -811,8 +849,10 @@
         blockedBy: data.blockedBy || [],
         blocking: data.blocking || [],
       };
-      TYPES.forEach((t) => wrap.appendChild(group(t, map[t.type])));
-      if (data.warnings && data.warnings.length) {
+      let shown = 0;
+      TYPES.forEach((t) => { const g = group(t, map[t.type]); if (g) { wrap.appendChild(g); shown++; } });
+      if (readOnly && !shown) wrap.appendChild(el('span', { class: 'bar-hint', text: 'No relationships.' }));
+      if (data.warnings && data.warnings.length && !readOnly) {
         wrap.appendChild(el('div', { class: 'bar-hint', text: 'Unavailable on this repo: ' + data.warnings.join(', ') }));
       }
     }
@@ -821,8 +861,127 @@
     return el('div', { class: 'rel-section' }, [el('div', { class: 'field-label', text: 'Relationships' }), wrap]);
   }
 
-  function modalHeader(titleNode) {
-    return el('div', { class: 'modal-head' }, [titleNode, el('button', { class: 'btn btn-ghost', text: '✕', onclick: closeModal })]);
+  function modalHeader(titleNode, actions) {
+    const right = [].concat(actions || []).filter(Boolean);
+    right.push(el('button', { class: 'btn btn-ghost', text: '✕', onclick: closeModal }));
+    return el('div', { class: 'modal-head' }, [titleNode, el('div', { class: 'modal-head-actions' }, right)]);
+  }
+
+  // ---- view modal (read-only, opened by clicking a card) ----
+  function viewChip(label, value) {
+    return el('span', { class: 'view-chip' }, [
+      el('span', { class: 'view-chip-k', text: label }),
+      el('span', { class: 'view-chip-v', text: value }),
+    ]);
+  }
+  function labelPill(l) {
+    const team = isTeamLabel(l.name);
+    return el('span', {
+      class: 'label' + (team ? ' label-team' : ''),
+      style: `background:#${l.color}${team ? '' : '22'};border-color:#${l.color}`,
+      text: team ? ('👥 ' + teamDisplay(l.name)) : l.name,
+    });
+  }
+
+  // Read + add issue comments.
+  function buildCommentsSection(it) {
+    const list = el('div', { class: 'cmt-list' }, [el('span', { class: 'bar-hint', text: 'Loading…' })]);
+    const input = el('textarea', { class: 'modal-body-input cmt-input', rows: '3', placeholder: 'Leave a comment…' });
+    const addBtn = el('button', { class: 'btn btn-primary', text: 'Comment', onclick: async () => {
+      const txt = input.value.trim();
+      if (!txt) return;
+      addBtn.disabled = true; addBtn.textContent = 'Posting…';
+      try {
+        const res = await post('/api/comments.php', { repo: it.repo, number: it.number, body: txt });
+        input.value = '';
+        const hint = list.querySelector('.bar-hint'); if (hint) list.innerHTML = '';
+        list.appendChild(commentEl(res.comment));
+      } catch (e) { showError(e.message); }
+      finally { addBtn.disabled = false; addBtn.textContent = 'Comment'; }
+    } });
+
+    function commentEl(c) {
+      return el('div', { class: 'cmt' }, [
+        el('div', { class: 'cmt-head' }, [
+          avatarEl(c.author, c.avatarUrl, { size: 20 }),
+          el('a', { class: 'cmt-author', href: c.url || '#', target: '_blank', text: c.author || 'unknown' }),
+          c.createdAt ? el('span', { class: 'cmt-date', text: fmtDateTime(c.createdAt) }) : null,
+        ].filter(Boolean)),
+        el('div', { class: 'cmt-body', text: c.body || '' }),
+      ]);
+    }
+
+    async function load() {
+      list.innerHTML = '';
+      try {
+        const res = await api('/api/comments.php?repo=' + encodeURIComponent(it.repo) + '&number=' + it.number);
+        if (!res.comments || !res.comments.length) { list.appendChild(el('span', { class: 'bar-hint', text: 'No comments yet.' })); return; }
+        res.comments.forEach((c) => list.appendChild(commentEl(c)));
+      } catch (e) { list.appendChild(el('span', { class: 'bar-hint', text: 'Could not load comments.' })); }
+    }
+    load();
+
+    return el('div', { class: 'cmt-section' }, [
+      el('div', { class: 'field-label', text: 'Comments' }),
+      list,
+      el('div', { class: 'cmt-add' }, [input, addBtn]),
+    ]);
+  }
+
+  // A clean read-only summary of an issue, with an Edit button to switch to the
+  // field-editing form. Clicking a card lands here.
+  function renderViewModal(it, meta, ifOptions) {
+    meta = meta || { labels: [], milestones: [], assignees: [] };
+    const body = $('#modal-body');
+    body.innerHTML = '';
+
+    const editBtn = el('button', { class: 'btn btn-primary', text: 'Edit', onclick: () => renderModal(it, meta, ifOptions) });
+    const header = modalHeader(el('div', {}, [
+      it.url ? el('a', { class: 'modal-num', href: it.url, target: '_blank', text: '#' + (it.number || '') }) : null,
+      it.repo ? el('span', { class: 'modal-repo', text: ' ' + it.repo }) : null,
+    ]), [editBtn]);
+
+    const stateBadge = it.state
+      ? el('span', { class: 'view-state view-state-' + String(it.state).toLowerCase(), text: String(it.state).toLowerCase() })
+      : null;
+    const titleRow = el('div', { class: 'view-titlerow' }, [stateBadge, el('h2', { class: 'view-title', text: it.title || '(untitled)' })].filter(Boolean));
+
+    // key/value chips for the important fields
+    const chips = [];
+    const status = itemStatusName(it); if (status) chips.push(viewChip('Status', status));
+    const sprint = itemSprint(it);     if (sprint) chips.push(viewChip('Sprint', sprint));
+    const pts = itemPoints(it);         if (pts != null) chips.push(viewChip('Points', String(pts)));
+    const start = itemStart(it);        if (start) chips.push(viewChip('Start', fmtDue(start)));
+    const due = itemDue(it);            if (due) chips.push(viewChip('Due', fmtDue(due)));
+    if (it.milestone) chips.push(viewChip('Milestone', it.milestone.title));
+    const metaRow = chips.length ? el('div', { class: 'view-meta' }, chips) : null;
+
+    // assignees
+    let peopleRow = null;
+    if (it.assignees && it.assignees.length) {
+      peopleRow = el('div', { class: 'view-people' }, it.assignees.map((a) =>
+        el('span', { class: 'view-person' }, [avatarEl(a.login, a.avatarUrl, { size: 22 }), el('span', { text: a.login })])));
+    }
+
+    // labels (sprint labels are shown via the Sprint chip, not here)
+    const labels = (it.labels || []).filter((l) => !isSprintLabel(l.name));
+    const labelsRow = labels.length ? el('div', { class: 'view-labels' }, labels.map(labelPill)) : null;
+
+    const desc = (it.body || '').trim();
+    const descBox = el('div', { class: 'view-desc' + (desc ? '' : ' view-desc-empty') }, [desc || 'No description.']);
+
+    body.append(...[
+      header,
+      titleRow,
+      metaRow,
+      peopleRow,
+      labelsRow,
+      el('div', { class: 'field-label', text: 'Description' }),
+      descBox,
+      buildRelationsSection(it, true),
+      buildPrSection(it, true),
+      buildCommentsSection(it),
+    ].filter(Boolean));
   }
 
   // ---- edit modal ----
@@ -837,10 +996,12 @@
 
     const savers = [];
 
+    const backBtn = el('button', { class: 'btn btn-ghost', text: '← Back', title: 'Back to view',
+      onclick: () => renderViewModal(it, meta, ifOptions) });
     const header = modalHeader(el('div', {}, [
       it.url ? el('a', { class: 'modal-num', href: it.url, target: '_blank', text: '#' + (it.number || '') }) : null,
       it.repo ? el('span', { class: 'modal-repo', text: ' ' + it.repo }) : null,
-    ]));
+    ]), [backBtn]);
 
     const titleInput = el('input', { class: 'modal-title-input', value: it.title });
     const bodyInput = el('textarea', { class: 'modal-body-input', rows: '6' }, [it.body || '']);
@@ -884,12 +1045,7 @@
       const startInput = el('input', { class: 'inp', type: 'date', value: itemStart(it) || '' });
       savers.push(mkSaver(
         () => (startInput.value || '') !== (itemStart(it) || ''),
-        async () => {
-          const v = startInput.value === '' ? null : startInput.value;
-          await setField(it, cfg().startField, 'date', v);
-          it.fields[cfg().startField] = v == null ? undefined : { type: 'date', date: v };
-          it.start = v;
-        }
+        async () => { await setDateField(it, cfg().startField, startInput.value === '' ? null : startInput.value); }
       ));
       startRow = fieldRow('Start date', startInput);
     }
@@ -901,12 +1057,7 @@
       const dueInput = el('input', { class: 'inp', type: 'date', value: itemDue(it) || '' });
       savers.push(mkSaver(
         () => (dueInput.value || '') !== (itemDue(it) || ''),
-        async () => {
-          const v = dueInput.value === '' ? null : dueInput.value;
-          await setField(it, cfg().dueField, 'date', v);
-          it.fields[cfg().dueField] = v == null ? undefined : { type: 'date', date: v };
-          it.due = v;
-        }
+        async () => { await setDateField(it, cfg().dueField, dueInput.value === '' ? null : dueInput.value); }
       ));
       dueRow = fieldRow('Due date', dueInput);
     }
@@ -1081,12 +1232,10 @@
           if (pf) await post('/api/field.php', { itemId: res.itemId, fieldId: pf.id, kind: 'number', value: pointsInput.value });
         }
         if (startInput && startInput.value !== '' && cfg().startField) {
-          const stf = fieldMeta(cfg().startField);
-          if (stf) await post('/api/field.php', { itemId: res.itemId, fieldId: stf.id, kind: 'date', value: startInput.value });
+          await writeDate(res.itemId, res.issueId, cfg().startField, startInput.value);
         }
         if (dueInput && dueInput.value !== '' && cfg().dueField) {
-          const df = fieldMeta(cfg().dueField);
-          if (df) await post('/api/field.php', { itemId: res.itemId, fieldId: df.id, kind: 'date', value: dueInput.value });
+          await writeDate(res.itemId, res.issueId, cfg().dueField, dueInput.value);
         }
         if (sprintSel.value) {
           await post('/api/sprint-assign.php', { repo, number: res.number, labels, sprint: sprintSel.value });
