@@ -521,17 +521,11 @@
     modal.classList.remove('hidden');
     body.innerHTML = '<div class="loading">Loading…</div>';
 
+    // Issue-field options now come from the board (state.board.issueFields), so
+    // we only need the repo's labels/milestones/assignees here.
     let meta = { labels: [], milestones: [], assignees: [] };
-    const ifOptions = {};
-    const jobs = [];
-    if (it.repo) jobs.push(loadMeta(it.repo).then((m) => { meta = m; }).catch(() => {}));
-    if (it.issueId) jobs.push(
-      api('/api/issue-field-options.php?issueId=' + encodeURIComponent(it.issueId))
-        .then((r) => { (r.fields || []).forEach((f) => { ifOptions[f.fieldId] = f; }); })
-        .catch(() => {})
-    );
-    await Promise.all(jobs);
-    renderViewModal(it, meta, ifOptions);
+    if (it.repo) { try { meta = await loadMeta(it.repo); } catch (e) { /* limited */ } }
+    renderViewModal(it, meta);
   }
 
   async function loadMeta(repo) {
@@ -549,6 +543,22 @@
       el('div', { class: 'field-label', text: label }),
       el('div', { class: 'field-controls' }, controls.filter(Boolean)),
     ]);
+  }
+  // A grid cell: label on top, a single full-width control below. Used to pack
+  // the small scalar fields (Status, Points, Priority, …) into a 2-column grid.
+  function gridField(label, control) {
+    return el('div', { class: 'grid-field' }, [
+      el('div', { class: 'field-label', text: label }),
+      control,
+    ]);
+  }
+  // Real issues currently on the board (for relationship dropdown pickers),
+  // excluding the given item and any draft issues.
+  function boardIssueOptions(it) {
+    return (state.board.items || [])
+      .filter((x) => x.number && x.repo && x.type === 'Issue' && !(x.repo === it.repo && x.number === it.number))
+      .map((x) => ({ repo: x.repo, number: x.number, title: x.title || '' }))
+      .sort((a, b) => (a.repo === b.repo ? a.number - b.number : a.repo.localeCompare(b.repo)));
   }
   function buildStatusSelect(currentOptionId) {
     const sel = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })]);
@@ -665,77 +675,72 @@
     return { dirty, apply: async () => { if (dirty()) await apply(); } };
   }
 
-  // editable section for GitHub Issue fields + any extra Projects v2 fields.
-  // Each control registers a "saver" on the shared list; the modal's single
-  // Save button runs them all, and each one no-ops if its value is unchanged.
-  function buildEditableFields(it, ifOptions, savers) {
-    const wrap = el('div', {});
-    let any = false;
-    const addRow = (label, control) => {
-      any = true;
-      wrap.appendChild(el('div', { class: 'field-row' }, [
-        el('div', { class: 'field-label', text: label }),
-        el('div', { class: 'field-controls' }, [control]),
-      ]));
-    };
+  // Editable GitHub Issue fields + any extra Projects v2 fields. Returns an
+  // array of { label, control } entries (the modal lays them out in a grid) and
+  // registers a saver per control. Issue fields are read from the board-wide
+  // definitions (state.board.issueFields) so fields like Priority/Effort/Size
+  // are editable even when this issue hasn't set them yet. Dirty checks read the
+  // live item state so the Save button clears correctly after a save.
+  function buildEditableFields(it, savers) {
+    const entries = [];
+    it.issueFields = it.issueFields || {};
+    const dateSkip = new Set([cfg().startField, cfg().dueField].filter(Boolean)); // dedicated Start/Due rows handle these
 
-    // GitHub Issue fields (Priority, Effort, Start date, Target date, …)
-    Object.entries(it.issueFields || {}).forEach(([name, f]) => {
-      if (!f.fieldId || !it.issueId) return;
-      if (f.type === 'date') {
-        const inp = el('input', { class: 'inp', type: 'date', value: f.value || '' });
-        addRow(name, inp);
-        savers.push(mkSaver(
-          () => (inp.value || '') !== (f.value || ''),
-          async () => { const v = inp.value || null; await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'date', value: v }); f.value = v; recomputeDates(it); }
-        ));
-      } else if (f.type === 'number') {
-        const inp = el('input', { class: 'inp', type: 'number', step: 'any', value: f.value ?? '' });
-        addRow(name, inp);
-        savers.push(mkSaver(
-          () => (inp.value === '' ? null : parseFloat(inp.value)) !== (f.value ?? null),
-          async () => { const nv = inp.value === '' ? null : parseFloat(inp.value); await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'number', value: inp.value === '' ? null : inp.value }); f.value = nv; }
-        ));
-      } else if (f.type === 'text') {
-        const inp = el('input', { class: 'inp', type: 'text', value: f.value || '' });
-        addRow(name, inp);
-        savers.push(mkSaver(
-          () => (inp.value || '') !== (f.value || ''),
-          async () => { const v = inp.value || null; await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'text', value: v }); f.value = v; }
-        ));
-      } else if (f.type === 'select') {
-        const opt = ifOptions[f.fieldId];
-        if (opt && opt.options && opt.options.length) {
-          const sel = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })].concat(opt.options.map((o) => el('option', { value: o.id, text: o.name }))));
-          sel.value = f.optionId || opt.currentOptionId || '';
-          addRow(name, sel);
+    if (it.issueId) {
+      Object.entries(state.board.issueFields || {}).forEach(([name, def]) => {
+        const cur = () => it.issueFields[name] || {};
+        if (def.type === 'select') {
+          const opts = def.options || [];
+          const sel = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })].concat(opts.map((o) => el('option', { value: o.id, text: o.name }))));
+          sel.value = cur().optionId || '';
+          entries.push({ label: name, control: sel });
           savers.push(mkSaver(
-            () => sel.value !== (f.optionId || opt.currentOptionId || ''),
+            () => sel.value !== (cur().optionId || ''),
             async () => {
               const v = sel.value || null;
-              await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: f.fieldId, kind: 'select', value: v });
-              const chosen = opt.options.find((o) => o.id === v);
-              f.optionId = v; f.value = chosen ? chosen.name : null; f.color = chosen ? chosen.color : null;
+              await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: def.id, kind: 'select', value: v });
+              const chosen = opts.find((o) => o.id === v);
+              it.issueFields[name] = { type: 'select', value: chosen ? chosen.name : null, optionId: v, color: chosen ? chosen.color : null, fieldId: def.id, options: opts };
             }
           ));
-        } else {
-          addRow(name, el('span', { class: 'ro-val', text: f.value || '—' }));
+        } else if (def.type === 'number') {
+          const inp = el('input', { class: 'inp', type: 'number', step: 'any', value: cur().value ?? '' });
+          entries.push({ label: name, control: inp });
+          savers.push(mkSaver(
+            () => (inp.value === '' ? null : parseFloat(inp.value)) !== (cur().value ?? null),
+            async () => { const nv = inp.value === '' ? null : parseFloat(inp.value); await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: def.id, kind: 'number', value: inp.value === '' ? null : inp.value }); it.issueFields[name] = { type: 'number', value: nv, fieldId: def.id }; }
+          ));
+        } else if (def.type === 'text') {
+          const inp = el('input', { class: 'inp', type: 'text', value: cur().value || '' });
+          entries.push({ label: name, control: inp });
+          savers.push(mkSaver(
+            () => (inp.value || '') !== (cur().value || ''),
+            async () => { const v = inp.value || null; await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: def.id, kind: 'text', value: v }); it.issueFields[name] = { type: 'text', value: v, fieldId: def.id }; }
+          ));
+        } else if (def.type === 'date' && !dateSkip.has(name)) {
+          const inp = el('input', { class: 'inp', type: 'date', value: cur().value || '' });
+          entries.push({ label: name, control: inp });
+          savers.push(mkSaver(
+            () => (inp.value || '') !== (cur().value || ''),
+            async () => { const v = inp.value || null; await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: def.id, kind: 'date', value: v }); it.issueFields[name] = { type: 'date', value: v, fieldId: def.id }; recomputeDates(it); }
+          ));
         }
-      }
-    });
+      });
+    }
 
-    // extra Projects v2 fields (Size, etc.), excluding ones handled elsewhere
+    // extra Projects v2 fields (Size as a project field, etc.), excluding ones handled elsewhere
     const skip = new Set([cfg().statusField, cfg().pointsField, cfg().startField, cfg().dueField].filter(Boolean));
     Object.entries(it.fields || {}).forEach(([name, f]) => {
       if (skip.has(name)) return;
       const meta = fieldMeta(name); if (!meta) return;
+      const cur = () => it.fields[name] || {};
       if (f.type === 'single_select') {
         const opts = meta.options || [];
         const sel = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })].concat(opts.map((o) => el('option', { value: o.id, text: o.name }))));
         sel.value = f.optionId || '';
-        addRow(name, sel);
+        entries.push({ label: name, control: sel });
         savers.push(mkSaver(
-          () => sel.value !== (f.optionId || ''),
+          () => sel.value !== (cur().optionId || ''),
           async () => {
             const v = sel.value || null; await setField(it, name, 'singleSelect', v);
             const chosen = opts.find((o) => o.id === v); it.fields[name] = v ? { type: 'single_select', name: chosen ? chosen.name : null, optionId: v } : undefined;
@@ -743,30 +748,29 @@
         ));
       } else if (f.type === 'number') {
         const inp = el('input', { class: 'inp', type: 'number', step: 'any', value: f.number ?? '' });
-        addRow(name, inp);
+        entries.push({ label: name, control: inp });
         savers.push(mkSaver(
-          () => (inp.value === '' ? null : parseFloat(inp.value)) !== (f.number ?? null),
+          () => (inp.value === '' ? null : parseFloat(inp.value)) !== (cur().number ?? null),
           async () => { const nv = inp.value === '' ? null : parseFloat(inp.value); await setField(it, name, 'number', inp.value === '' ? null : inp.value); it.fields[name] = nv === null ? undefined : { type: 'number', number: nv }; }
         ));
       } else if (f.type === 'text') {
         const inp = el('input', { class: 'inp', type: 'text', value: f.text || '' });
-        addRow(name, inp);
+        entries.push({ label: name, control: inp });
         savers.push(mkSaver(
-          () => (inp.value || '') !== (f.text || ''),
+          () => (inp.value || '') !== (cur().text || ''),
           async () => { const v = inp.value || null; await setField(it, name, 'text', v); it.fields[name] = v ? { type: 'text', text: v } : undefined; }
         ));
       } else if (f.type === 'date') {
         const inp = el('input', { class: 'inp', type: 'date', value: f.date || '' });
-        addRow(name, inp);
+        entries.push({ label: name, control: inp });
         savers.push(mkSaver(
-          () => (inp.value || '') !== (f.date || ''),
+          () => (inp.value || '') !== (cur().date || ''),
           async () => { const v = inp.value || null; await setField(it, name, 'date', v); it.fields[name] = v ? { type: 'date', date: v } : undefined; recomputeDates(it); }
         ));
       }
     });
 
-    if (!any) return null;
-    return el('div', {}, [el('div', { class: 'field-label', text: 'Fields' }), wrap]);
+    return entries;
   }
 
   // parse an issue reference: "123", "#123", "owner/name#123", or an issue URL.
@@ -819,16 +823,18 @@
       else list.appendChild(el('span', { class: 'bar-hint', text: '—' }));
 
       const controls = readOnly ? null : (() => {
-        const input = el('input', { class: 'inp rel-input', type: 'text', placeholder: t.placeholder });
+        const opts = boardIssueOptions(it);
+        const sel = el('select', { class: 'inp rel-input' }, [el('option', { value: '', text: '— pick an issue —' })]
+          .concat(opts.map((o) => el('option', { value: o.repo + '#' + o.number, text: '#' + o.number + ' ' + o.title }))));
         const addBtn = el('button', { class: 'btn', text: t.add, onclick: async () => {
-          const ref = parseIssueRef(input.value, it.repo);
-          if (!ref) { showError('Enter an issue number, owner/repo#number, or issue URL'); return; }
+          const ref = parseIssueRef(sel.value, it.repo);
+          if (!ref) { showError('Pick an issue first'); return; }
           addBtn.disabled = true;
-          try { await setRel(t.type, ref, 'add'); input.value = ''; await load(); }
+          try { await setRel(t.type, ref, 'add'); sel.value = ''; await load(); }
           catch (e) { showError(e.message); }
           finally { addBtn.disabled = false; }
         } });
-        return el('div', { class: 'field-controls' }, [input, addBtn]);
+        return el('div', { class: 'field-controls' }, [sel, addBtn]);
       })();
 
       return el('div', { class: 'rel-group' }, [
@@ -930,12 +936,12 @@
 
   // A clean read-only summary of an issue, with an Edit button to switch to the
   // field-editing form. Clicking a card lands here.
-  function renderViewModal(it, meta, ifOptions) {
+  function renderViewModal(it, meta) {
     meta = meta || { labels: [], milestones: [], assignees: [] };
     const body = $('#modal-body');
     body.innerHTML = '';
 
-    const editBtn = el('button', { class: 'btn btn-primary', text: 'Edit', onclick: () => renderModal(it, meta, ifOptions) });
+    const editBtn = el('button', { class: 'btn btn-primary', text: 'Edit', onclick: () => renderModal(it, meta) });
     const header = modalHeader(el('div', {}, [
       it.url ? el('a', { class: 'modal-num', href: it.url, target: '_blank', text: '#' + (it.number || '') }) : null,
       it.repo ? el('span', { class: 'modal-repo', text: ' ' + it.repo }) : null,
@@ -989,15 +995,16 @@
   // button at the bottom runs them all; each saver no-ops when its value is
   // unchanged, so only edited fields hit the API. (Relationships and linked PRs
   // are discrete add/remove actions and manage themselves outside this flow.)
-  function renderModal(it, meta, ifOptions) {
-    ifOptions = ifOptions || {};
+  function renderModal(it, meta) {
+    meta = meta || { labels: [], milestones: [], assignees: [] };
     const body = $('#modal-body');
     body.innerHTML = '';
 
     const savers = [];
+    const gridEntries = []; // small scalar fields, packed into a 2-column grid
 
     const backBtn = el('button', { class: 'btn btn-ghost', text: '← Back', title: 'Back to view',
-      onclick: () => renderViewModal(it, meta, ifOptions) });
+      onclick: () => renderViewModal(it, meta) });
     const header = modalHeader(el('div', {}, [
       it.url ? el('a', { class: 'modal-num', href: it.url, target: '_blank', text: '#' + (it.number || '') }) : null,
       it.repo ? el('span', { class: 'modal-repo', text: ' ' + it.repo }) : null,
@@ -1016,9 +1023,9 @@
       () => !!statusSel.value && statusSel.value !== ((it.fields[cfg().statusField] || {}).optionId || ''),
       async () => { await moveCard(it.itemId, statusSel.value); }
     ));
+    gridEntries.push({ label: 'Status', control: statusSel });
 
     // Story Points (or a create-field prompt if the board has no points field)
-    let pointsRow;
     if (cfg().pointsField) {
       const pointsInput = el('input', { class: 'inp', type: 'number', step: '0.5', value: itemPoints(it) ?? '' });
       savers.push(mkSaver(
@@ -1029,37 +1036,34 @@
           it.fields[cfg().pointsField] = nv == null ? undefined : { type: 'number', number: nv };
         }
       ));
-      pointsRow = fieldRow('Story Points', pointsInput);
+      gridEntries.push({ label: 'Story Points', control: pointsInput });
     } else {
       const createBtn = el('button', { class: 'btn', text: `Create "${cfg().pointsName}" field`, onclick: async () => {
         createBtn.disabled = true; createBtn.textContent = 'Creating…';
         try { await post('/api/create-field.php', { name: cfg().pointsName, dataType: 'NUMBER' }); closeModal(); await refresh(); }
         catch (e) { createBtn.disabled = false; createBtn.textContent = `Create "${cfg().pointsName}" field`; showError(e.message); }
       } });
-      pointsRow = fieldRow('Story Points', el('span', { class: 'bar-hint', text: 'No points field on this board.' }), createBtn);
+      gridEntries.push({ label: 'Story Points', control: el('div', { class: 'grid-create' }, [el('span', { class: 'bar-hint', text: 'No points field.' }), createBtn]) });
     }
 
-    // Start date (optional Projects v2 Date field)
-    let startRow = null;
+    // Start date (issue-backed or Projects v2 date field)
     if (cfg().startField) {
       const startInput = el('input', { class: 'inp', type: 'date', value: itemStart(it) || '' });
       savers.push(mkSaver(
         () => (startInput.value || '') !== (itemStart(it) || ''),
         async () => { await setDateField(it, cfg().startField, startInput.value === '' ? null : startInput.value); }
       ));
-      startRow = fieldRow('Start date', startInput);
+      gridEntries.push({ label: 'Start date', control: startInput });
     }
 
-    // Due date — only editable here when it's a Projects v2 date field.
-    // (Issue-field dates are shown in the Fields section below.)
-    let dueRow = null;
+    // Due date
     if (cfg().dueField) {
       const dueInput = el('input', { class: 'inp', type: 'date', value: itemDue(it) || '' });
       savers.push(mkSaver(
         () => (dueInput.value || '') !== (itemDue(it) || ''),
         async () => { await setDateField(it, cfg().dueField, dueInput.value === '' ? null : dueInput.value); }
       ));
-      dueRow = fieldRow('Due date', dueInput);
+      gridEntries.push({ label: 'Due date', control: dueInput });
     }
 
     // Sprint (writes the sprint label)
@@ -1075,6 +1079,7 @@
         it.sprint = v || null;
       }
     ));
+    gridEntries.push({ label: 'Sprint', control: sprintSel });
 
     // Milestone
     const msSel = buildMilestoneSelect(meta.milestones, it.milestone);
@@ -1087,6 +1092,11 @@
         it.milestone = v == null ? null : { number: v, title: chosen ? chosen.title : ('#' + v) };
       }
     ));
+    gridEntries.push({ label: 'Milestone', control: msSel });
+
+    // GitHub Issue fields (Priority, Effort, Size, …) + extra Projects v2 fields.
+    buildEditableFields(it, savers).forEach((e) => gridEntries.push(e));
+    const fieldGrid = el('div', { class: 'field-grid' }, gridEntries.map((e) => gridField(e.label, e.control)));
 
     // Labels (Teams + Labels split); sprint labels are managed via the Sprint field.
     const labelSrc = meta.labels.length ? meta.labels : it.labels;
@@ -1136,13 +1146,7 @@
     body.append(...[
       header,
       titleInput,
-      fieldRow('Status', statusSel),
-      pointsRow,
-      startRow,
-      dueRow,
-      fieldRow('Sprint', sprintSel),
-      fieldRow('Milestone', msSel),
-      buildEditableFields(it, ifOptions, savers),
+      fieldGrid,
       el('div', { class: 'field-row' }, [el('div', { class: 'field-label', text: 'Labels' }), labelSecs.wrap]),
       el('div', { class: 'field-row' }, [el('div', { class: 'field-label', text: 'Assignees' }), asgSecs.wrap]),
       buildRelationsSection(it),
@@ -1248,15 +1252,19 @@
       await refresh();
     } });
 
+    const createGrid = el('div', { class: 'field-grid' }, [
+      gridField('Status', statusSel),
+      pointsInput ? gridField('Story Points', pointsInput) : null,
+      startInput ? gridField('Start date', startInput) : null,
+      dueInput ? gridField('Due date', dueInput) : null,
+      gridField('Sprint', sprintSel),
+    ].filter(Boolean));
+
     body.append(...[
       modalHeader(el('strong', { text: 'New issue' })),
       fieldRow('Repo', repoSel),
       titleInput,
-      fieldRow('Status', statusSel),
-      pointsInput ? fieldRow('Story Points', pointsInput) : null,
-      startInput ? fieldRow('Start date', startInput) : null,
-      dueInput ? fieldRow('Due date', dueInput) : null,
-      fieldRow('Sprint', sprintSel),
+      createGrid,
       dyn,
       el('div', { class: 'field-label', text: 'Description' }),
       bodyInput,

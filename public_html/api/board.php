@@ -99,7 +99,7 @@ function fetch_items(string $projectId): array
                       __typename
                       ... on IssueFieldDateValue { dateValue: value field { ... on IssueFieldDate { id name } } }
                       ... on IssueFieldNumberValue { numberValue: value field { ... on IssueFieldNumber { id name } } }
-                      ... on IssueFieldSingleSelectValue { selectValue: name color optionId field { ... on IssueFieldSingleSelect { id name } } }
+                      ... on IssueFieldSingleSelectValue { selectValue: name color optionId field { ... on IssueFieldSingleSelect { id name options { id name color } } } }
                       ... on IssueFieldTextValue { textValue: value field { ... on IssueFieldText { id name } } }
                     }
                   }
@@ -198,7 +198,7 @@ function normalize_item(array $node): array
                 $issueFields[$name] = ['type' => 'number', 'value' => $fv['numberValue'] ?? null, 'fieldId' => $fid];
                 break;
             case 'IssueFieldSingleSelectValue':
-                $issueFields[$name] = ['type' => 'select', 'value' => $fv['selectValue'] ?? null, 'optionId' => $fv['optionId'] ?? null, 'color' => $fv['color'] ?? null, 'fieldId' => $fid];
+                $issueFields[$name] = ['type' => 'select', 'value' => $fv['selectValue'] ?? null, 'optionId' => $fv['optionId'] ?? null, 'color' => $fv['color'] ?? null, 'fieldId' => $fid, 'options' => $fv['field']['options'] ?? []];
                 break;
             case 'IssueFieldTextValue':
                 $issueFields[$name] = ['type' => 'text', 'value' => $fv['textValue'] ?? null, 'fieldId' => $fid];
@@ -285,8 +285,10 @@ function fetch_board(): array
     // project date fields) for each item.
     foreach ($items as &$it) {
         foreach (($it['issueFields'] ?? []) as $n => $f) {
-            if (!isset($issueFieldDefs[$n]) && !empty($f['fieldId'])) {
-                $issueFieldDefs[$n] = ['id' => $f['fieldId'], 'type' => $f['type'] ?? null];
+            if (!empty($f['fieldId']) && (!isset($issueFieldDefs[$n]) || (($f['type'] ?? '') === 'select' && empty($issueFieldDefs[$n]['options']) && !empty($f['options'])))) {
+                $def = ['id' => $f['fieldId'], 'type' => $f['type'] ?? null];
+                if (($f['type'] ?? '') === 'select') $def['options'] = $f['options'] ?? [];
+                $issueFieldDefs[$n] = $def;
             }
         }
 
