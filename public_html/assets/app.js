@@ -473,7 +473,25 @@
       item.fields[cfg().statusField] = prev;
       renderBoard(); renderSprintBar();
       showError(e.message);
+      return;
     }
+    // Keep the issue's open/closed state in sync with the Done column. GitHub's
+    // project workflow auto-closes an issue moved to Done but does NOT reopen it
+    // when moved back out, so we reconcile both directions here.
+    try {
+      const done = (cfg().statusDone || '').toLowerCase();
+      const intoDone = !!opt && !!done && (opt.name || '').toLowerCase() === done;
+      const st = (item.state || '').toUpperCase();
+      if (item.repo && item.number) {
+        if (intoDone && st !== 'CLOSED') {
+          await post('/api/issue.php', { repo: item.repo, number: item.number, state: 'closed' });
+          item.state = 'CLOSED';
+        } else if (!intoDone && st === 'CLOSED') {
+          await post('/api/issue.php', { repo: item.repo, number: item.number, state: 'open' });
+          item.state = 'OPEN';
+        }
+      }
+    } catch (e) { showError(e.message); }
   }
 
   async function setField(item, fieldName, kind, value) {
