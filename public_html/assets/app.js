@@ -1290,6 +1290,128 @@
     ].filter(Boolean));
   }
 
+  // ---- create-mode helpers: same rich controls as the edit modal, but the
+  // issue doesn't exist yet, so each returns an apply(res) that persists its
+  // values once the issue has been created. ----
+
+  // Issue fields (Priority/Effort/Size/…) + extra Projects v2 custom fields,
+  // built empty from the board's field definitions.
+  function buildCreateFieldEditors() {
+    const entries = [];
+    const setters = [];
+    const skip = new Set([cfg().statusField, cfg().pointsField, cfg().startField, cfg().dueField].filter(Boolean));
+
+    Object.entries(state.board.issueFields || {}).forEach(([name, def]) => {
+      let control;
+      if (def.type === 'select') {
+        const opts = def.options || [];
+        control = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })].concat(opts.map((o) => el('option', { value: o.id, text: o.name }))));
+      } else if (def.type === 'number') { control = el('input', { class: 'inp', type: 'number', step: 'any' }); }
+      else if (def.type === 'text')     { control = el('input', { class: 'inp', type: 'text' }); }
+      else if (def.type === 'date')     { control = el('input', { class: 'inp', type: 'date' }); }
+      else return;
+      entries.push({ label: name, control });
+      setters.push({ src: 'issue', kind: def.type, fieldId: def.id, get: () => control.value || null });
+    });
+
+    Object.entries(state.board.fields || {}).forEach(([name, meta]) => {
+      if (skip.has(name) || (state.board.issueFields || {})[name]) return;
+      const dt = String(meta.dataType || '').toUpperCase();
+      let control, kind;
+      if (dt === 'SINGLE_SELECT') {
+        const opts = meta.options || [];
+        control = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })].concat(opts.map((o) => el('option', { value: o.id, text: o.name }))));
+        kind = 'singleSelect';
+      } else if (dt === 'NUMBER') { control = el('input', { class: 'inp', type: 'number', step: 'any' }); kind = 'number'; }
+      else if (dt === 'TEXT')     { control = el('input', { class: 'inp', type: 'text' }); kind = 'text'; }
+      else if (dt === 'DATE')     { control = el('input', { class: 'inp', type: 'date' }); kind = 'date'; }
+      else return;
+      entries.push({ label: name, control });
+      setters.push({ src: 'pv2', kind, fieldId: meta.id, get: () => control.value || null });
+    });
+
+    async function apply(res) {
+      for (const s of setters) {
+        const v = s.get();
+        if (v === null || v === '') continue;
+        if (s.src === 'issue') await post('/api/issue-field-set.php', { issueId: res.issueId, fieldId: s.fieldId, kind: s.kind, value: v });
+        else await post('/api/field.php', { itemId: res.itemId, fieldId: s.fieldId, kind: s.kind, value: v });
+      }
+    }
+    return { entries, apply };
+  }
+
+  // Deferred relationship pickers: collect links to add, apply after creation.
+  function buildCreateRelations(getRepo) {
+    const TYPES = [
+      { type: 'parent',    label: 'Parent (this is a sub-issue of)', add: 'Set parent' },
+      { type: 'child',     label: 'Sub-issues (nested under this)',  add: 'Add sub-issue' },
+      { type: 'blockedBy', label: 'Blocked by',                      add: 'Add' },
+      { type: 'blocking',  label: 'Blocking',                        add: 'Add' },
+    ];
+    const pending = []; // { type, repo, number, title }
+    const wrap = el('div', { class: 'rel-body' });
+    function render() {
+      wrap.innerHTML = '';
+      const opts = boardIssueOptions({ repo: getRepo(), number: -1 });
+      TYPES.forEach((t) => {
+        const list = el('div', { class: 'rel-list' });
+        pending.filter((p) => p.type === t.type).forEach((p) => {
+          list.appendChild(el('span', { class: 'rel-chip' }, [
+            el('span', { class: 'rel-link', text: ((p.repo !== getRepo() ? p.repo : '') + '#' + p.number + ' ' + (p.title || '')).trim() }),
+            el('button', { class: 'rel-x', text: '✕', title: 'Remove', onclick: () => { pending.splice(pending.indexOf(p), 1); render(); } }),
+          ]));
+        });
+        const controls = opts.length ? (() => {
+          const sel = el('select', { class: 'inp rel-input' }, [el('option', { value: '', text: '— pick an issue —' })]
+            .concat(opts.map((o) => el('option', { value: o.repo + '#' + o.number, text: '#' + o.number + ' ' + o.title }))));
+          const addBtn = el('button', { class: 'btn', text: t.add, onclick: () => {
+            const ref = parseIssueRef(sel.value, getRepo());
+            if (!ref) { showError('Pick an issue first'); return; }
+            const o = opts.find((x) => x.repo === ref.repo && x.number === ref.number);
+            pending.push({ type: t.type, repo: ref.repo, number: ref.number, title: o ? o.title : '' });
+            render();
+          } });
+          return el('div', { class: 'field-controls' }, [sel, addBtn]);
+        })() : el('span', { class: 'bar-hint', text: 'No other board issues to link.' });
+        wrap.appendChild(el('div', { class: 'rel-group' }, [el('div', { class: 'rel-grouplabel', text: t.label }), list, controls]));
+      });
+    }
+    render();
+    async function apply(res) {
+      for (const p of pending) {
+        await post('/api/relation-set.php', { repo: res.repo, number: res.number, targetRepo: p.repo, targetNumber: p.number, type: p.type, op: 'add' });
+      }
+    }
+    return { node: el('div', { class: 'rel-section' }, [el('div', { class: 'field-label', text: 'Relationships' }), wrap]), apply };
+  }
+
+  // Deferred "Closes" PR links: collect PR numbers, apply after creation.
+  function buildCreatePrs() {
+    const pending = [];
+    const list = el('div', { class: 'pr-list' });
+    const input = el('input', { class: 'inp', type: 'number', placeholder: 'PR #', style: 'width:90px' });
+    function render() {
+      list.innerHTML = '';
+      if (!pending.length) { list.appendChild(el('span', { class: 'bar-hint', text: 'No PRs queued.' })); return; }
+      pending.forEach((n) => list.appendChild(el('div', { class: 'pr-row' }, [
+        el('span', { class: 'pr-link', text: '#' + n + ' (Closes)' }),
+        el('button', { class: 'rel-x', text: '✕', title: 'Remove', onclick: () => { pending.splice(pending.indexOf(n), 1); render(); } }),
+      ])));
+    }
+    const addBtn = el('button', { class: 'btn', text: 'Attach (Closes)', onclick: () => {
+      const n = parseInt((input.value || '').trim(), 10);
+      if (!n) return;
+      if (!pending.includes(n)) pending.push(n);
+      input.value = ''; render();
+    } });
+    render();
+    async function apply(res) {
+      for (const n of pending) await post('/api/pr-link.php', { repo: res.repo, issueNumber: res.number, prNumber: n, keyword: 'Closes' });
+    }
+    return { node: el('div', { class: 'pr-section' }, [el('div', { class: 'field-label', text: 'Pull requests' }), list, el('div', { class: 'field-controls' }, [input, addBtn])]), apply };
+  }
+
   // ---- create-issue modal (same interface as edit) ----
   function boardRepos() {
     const set = new Set();
@@ -1314,6 +1436,11 @@
     const pointsInput = cfg().pointsField ? el('input', { class: 'inp', type: 'number', step: '0.5', placeholder: 'pts' }) : null;
     const startInput = cfg().startField ? el('input', { class: 'inp', type: 'date' }) : null;
     const dueInput = cfg().dueField ? el('input', { class: 'inp', type: 'date' }) : null;
+
+    // Rich controls matching the edit modal (applied right after creation).
+    const fieldEditors = buildCreateFieldEditors();
+    const createRels = buildCreateRelations(repoVal);
+    const createPrs = buildCreatePrs();
 
     // repo-dependent controls (labels / assignees / milestone)
     const dyn = el('div', { class: 'create-dyn' });
@@ -1377,6 +1504,9 @@
         if (sprintSel.value) {
           await post('/api/sprint-assign.php', { repo, number: res.number, labels, sprint: sprintSel.value });
         }
+        await fieldEditors.apply(res); // Priority/Effort/Size + custom fields
+        await createRels.apply(res);   // relationships
+        await createPrs.apply(res);    // linked PRs
       } catch (e) {
         // Issue is already created and on the board; a field-setting step failed.
         showError('Issue created, but some fields could not be set: ' + e.message);
@@ -1391,7 +1521,7 @@
       startInput ? gridField('Start date', startInput) : null,
       dueInput ? gridField('Due date', dueInput) : null,
       gridField('Sprint', sprintSel),
-    ].filter(Boolean));
+    ].concat(fieldEditors.entries.map((e) => gridField(e.label, e.control))).filter(Boolean));
 
     body.append(...[
       modalHeader(el('strong', { text: 'New issue' })),
@@ -1399,6 +1529,8 @@
       titleInput,
       createGrid,
       dyn,
+      createRels.node,
+      createPrs.node,
       el('div', { class: 'field-label', text: 'Description' }),
       bodyInput,
       createBtn,
