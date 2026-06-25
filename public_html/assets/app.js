@@ -486,7 +486,12 @@
     return el('div', { class: 'col' }, [
       el('div', { class: 'col-head' }, [
         el('span', { class: 'col-title', text: col.name }),
-        el('span', { class: 'col-count', text: `${col.items.length} · ${pts} pts` }),
+        el('div', { class: 'col-head-right' }, [
+          el('span', { class: 'col-count', text: `${col.items.length} · ${pts} pts` }),
+          col.optionId ? el('button', { class: 'col-add', text: '+',
+            title: 'New issue in ' + col.name + (state.sprint && state.sprint !== 'all' ? ' · ' + state.sprint : ''),
+            onclick: (e) => { e.stopPropagation(); openCreateModal({ status: col.optionId }); } }) : null,
+        ].filter(Boolean)),
       ]),
       body,
     ]);
@@ -674,10 +679,15 @@
   // Real issues currently on the board (for relationship dropdown pickers).
   // Identify issues by having both a number and a repo (draft issues have
   // neither); we deliberately don't gate on the `type` string, which isn't
-  // reliable across boards. Excludes the given item and any pull requests.
+  // reliable across boards. Excludes the given item, pull requests, closed
+  // issues, and (when a sprint is selected) issues outside the current sprint.
   function boardIssueOptions(it) {
+    const sprintFilter = state.sprint && state.sprint !== 'all' ? state.sprint : null;
     return (state.board.items || [])
-      .filter((x) => x.number && x.repo && x.type !== 'PullRequest' && !(x.repo === it.repo && x.number === it.number))
+      .filter((x) => x.number && x.repo && x.type !== 'PullRequest'
+        && String(x.state || '').toUpperCase() !== 'CLOSED'
+        && (!sprintFilter || itemSprint(x) === sprintFilter)
+        && !(x.repo === it.repo && x.number === it.number))
       .map((x) => ({ repo: x.repo, number: x.number, title: x.title || '' }))
       .sort((a, b) => (a.repo === b.repo ? a.number - b.number : a.repo.localeCompare(b.repo)));
   }
@@ -1138,10 +1148,16 @@
 
     const backBtn = el('button', { class: 'btn btn-ghost', text: '← Back', title: 'Back to view',
       onclick: () => renderViewModal(it, meta) });
+    const delBtn = it.issueId ? el('button', { class: 'btn btn-ghost btn-danger', text: '🗑 Delete', title: 'Permanently delete this issue', onclick: async () => {
+      if (!confirm('Permanently delete issue #' + it.number + ' on GitHub? This cannot be undone.')) return;
+      delBtn.disabled = true; delBtn.textContent = 'Deleting…';
+      try { await post('/api/issue-delete.php', { issueId: it.issueId }); closeModal(); await refresh(); }
+      catch (e) { delBtn.disabled = false; delBtn.textContent = '🗑 Delete'; showError(e.message); }
+    } }) : null;
     const header = modalHeader(el('div', {}, [
       it.url ? el('a', { class: 'modal-num', href: it.url, target: '_blank', text: '#' + (it.number || '') }) : null,
       it.repo ? el('span', { class: 'modal-repo', text: ' ' + it.repo }) : null,
-    ]), [backBtn]);
+    ]), [delBtn, backBtn]);
 
     const titleInput = el('input', { class: 'modal-title-input', value: it.title });
     const bodyInput = el('textarea', { class: 'modal-body-input', rows: '6' }, [it.body || '']);
@@ -1419,7 +1435,8 @@
     return Array.from(set).sort();
   }
 
-  function openCreateModal() {
+  function openCreateModal(preset) {
+    preset = preset || {};
     $('#modal').classList.remove('hidden');
     const body = $('#modal-body');
     body.innerHTML = '';
@@ -1429,10 +1446,14 @@
                                  : el('input', { class: 'inp', type: 'text', placeholder: 'owner/repo' });
     const repoVal = () => (repos.length ? repoSel.value : repoSel.value.trim());
 
+    // Default the sprint to the one currently selected on the board (unless the
+    // caller overrides it); default the status when launched from a column's +.
+    const sprintDefault = preset.sprint != null ? preset.sprint : (state.sprint && state.sprint !== 'all' ? state.sprint : '');
+
     const titleInput = el('input', { class: 'modal-title-input', placeholder: 'Issue title' });
     const bodyInput = el('textarea', { class: 'modal-body-input', rows: '6', placeholder: 'Description (optional)' });
-    const statusSel = buildStatusSelect('');
-    const sprintSel = buildSprintSelect('');
+    const statusSel = buildStatusSelect(preset.status || '');
+    const sprintSel = buildSprintSelect(sprintDefault);
     const pointsInput = cfg().pointsField ? el('input', { class: 'inp', type: 'number', step: '0.5', placeholder: 'pts' }) : null;
     const startInput = cfg().startField ? el('input', { class: 'inp', type: 'date' }) : null;
     const dueInput = cfg().dueField ? el('input', { class: 'inp', type: 'date' }) : null;
@@ -1743,7 +1764,7 @@
 
     $('#filter-mine').addEventListener('change', (e) => { state.filterMine = e.target.checked; rerender(); });
     $('#refresh-btn').addEventListener('click', refresh);
-    $('#new-issue-btn').addEventListener('click', openCreateModal);
+    $('#new-issue-btn').addEventListener('click', () => openCreateModal());
     $$('.tab').forEach((t) => t.addEventListener('click', () => setView(t.dataset.view)));
     $('#modal').addEventListener('click', (e) => { if (e.target.classList.contains('modal-backdrop')) closeModal(); });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });

@@ -27,6 +27,8 @@ html, body {
 .btn:disabled { opacity: .6; cursor: default; }
 .btn-primary { background: var(--accent-2); border-color: var(--accent-2); }
 .btn-ghost { background: transparent; }
+.btn-danger { color: var(--danger); }
+.btn-danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 
 /* ---- login ---- */
 .login-screen { display: flex; height: 100vh; align-items: center; justify-content: center; }
@@ -118,9 +120,13 @@ html, body {
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
   min-width: 280px; max-width: 300px; display: flex; flex-direction: column; max-height: calc(100vh - 160px);
 }
-.col-head { display: flex; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.col-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); }
 .col-title { font-weight: 600; }
+.col-head-right { display: flex; align-items: center; gap: 8px; }
 .col-count { color: var(--muted); font-size: 12px; }
+.col-add { width: 22px; height: 22px; line-height: 1; padding: 0; border-radius: 6px; cursor: pointer;
+  background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); font-size: 15px; }
+.col-add:hover { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
 .col-body { padding: 10px; overflow-y: auto; flex: 1; min-height: 60px; }
 .col-body.drag-over { background: rgba(47,129,247,.08); outline: 2px dashed var(--accent); outline-offset: -4px; }
 
