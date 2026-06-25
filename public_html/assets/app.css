@@ -308,6 +308,24 @@ html, body {
 .cmt-add { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .cmt-input { margin-bottom: 0; }
 
+/* ---- rendered markdown (issue description + comments) ---- */
+.md { white-space: normal; }
+.md-line { min-height: 1em; margin: 0 0 4px; }
+.md-line:last-child { margin-bottom: 0; }
+.md a { color: var(--accent); text-decoration: none; word-break: break-all; }
+.md a:hover { text-decoration: underline; }
+.md strong { font-weight: 600; }
+.md em { font-style: italic; }
+.md-code { background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+  padding: 0 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+.md-pre { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; overflow: auto; margin: 6px 0; }
+.md-pre code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre; }
+.md-h { font-weight: 600; margin: 10px 0 4px; }
+.md-h1 { font-size: 1.25em; } .md-h2 { font-size: 1.15em; } .md-h3 { font-size: 1.05em; }
+.md-ul { margin: 4px 0; padding-left: 20px; }
+.md-ul li { margin: 2px 0; }
+
 /* ---- sprint manager ---- */
 .sprint-list { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 18px; }
 .sprint-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;

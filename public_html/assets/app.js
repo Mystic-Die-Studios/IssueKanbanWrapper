@@ -91,6 +91,54 @@
   function itemDue(it) { return it.due || null; }
   function fmtDue(iso) { try { return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); } catch (e) { return iso; } }
   function fmtDateTime(iso) { try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); } catch (e) { return iso; } }
+
+  // Minimal, XSS-safe Markdown -> HTML for issue/comment bodies. All text is
+  // HTML-escaped first and only http(s)/mailto links are emitted, so the result
+  // is safe to inject. Supports links (markdown + bare URLs), bold, italic,
+  // inline + fenced code, headings, bullet lists, and line breaks — enough to
+  // read GitHub issue text comfortably without pulling in a markdown library.
+  function mdToHtml(src) {
+    src = String(src || '').replace(/\r\n?/g, '\n');
+    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const escAttr = (s) => esc(s).replace(/"/g, '&quot;');
+    const safeUrl = (u) => /^(https?:\/\/|mailto:)/i.test(u) ? u.replace(/&amp;/g, '&') : null;
+
+    // pull fenced code blocks out first so their contents aren't reformatted
+    const blocks = [];
+    src = src.replace(/```[^\n]*\n?([\s\S]*?)```/g, (m, code) => {
+      blocks.push('<pre class="md-pre"><code>' + esc(code.replace(/\n$/, '')) + '</code></pre>');
+      return '\n@@MDBLOCK' + (blocks.length - 1) + '@@\n';
+    });
+
+    let text = esc(src);
+    text = text.replace(/`([^`\n]+)`/g, (m, c) => '<code class="md-code">' + c + '</code>');
+    text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
+      const safe = safeUrl(url);
+      return safe ? '<a href="' + escAttr(safe) + '" target="_blank" rel="noopener">' + label + '</a>' : m;
+    });
+    text = text.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (m, pre, url) => {
+      const safe = safeUrl(url);
+      return safe ? pre + '<a href="' + escAttr(safe) + '" target="_blank" rel="noopener">' + url + '</a>' : m;
+    });
+    text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+               .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+
+    const out = [];
+    let inList = false;
+    const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+    text.split('\n').forEach((line) => {
+      const ph = line.match(/^@@MDBLOCK(\d+)@@$/);
+      if (ph) { closeList(); out.push(blocks[+ph[1]]); return; }
+      let m;
+      if ((m = line.match(/^(#{1,6})\s+(.*)$/))) { closeList(); out.push('<div class="md-h md-h' + m[1].length + '">' + m[2] + '</div>'); return; }
+      if ((m = line.match(/^\s*[-*]\s+(.*)$/)))  { if (!inList) { out.push('<ul class="md-ul">'); inList = true; } out.push('<li>' + m[1] + '</li>'); return; }
+      if (line.trim() === '') { closeList(); return; }
+      closeList();
+      out.push('<div class="md-line">' + line + '</div>');
+    });
+    closeList();
+    return out.join('');
+  }
   // GitHub IssueFieldSingleSelectOptionColor enum -> hex
   const ISSUE_COLORS = { GRAY: '6e7681', BLUE: '1f6feb', GREEN: '238636', YELLOW: '9e6a03', ORANGE: 'bc4c00', RED: 'cf222e', PINK: 'bf3989', PURPLE: '8250df' };
   function issueColor(name) { if (!name) return null; const h = ISSUE_COLORS[String(name).toUpperCase()]; return h ? '#' + h : null; }
@@ -996,7 +1044,7 @@
           el('a', { class: 'cmt-author', href: c.url || '#', target: '_blank', text: c.author || 'unknown' }),
           c.createdAt ? el('span', { class: 'cmt-date', text: fmtDateTime(c.createdAt) }) : null,
         ].filter(Boolean)),
-        el('div', { class: 'cmt-body', text: c.body || '' }),
+        el('div', { class: 'cmt-body md', html: mdToHtml(c.body || '') }),
       ]);
     }
 
@@ -1057,7 +1105,9 @@
     const labelsRow = labels.length ? el('div', { class: 'view-labels' }, labels.map(labelPill)) : null;
 
     const desc = (it.body || '').trim();
-    const descBox = el('div', { class: 'view-desc' + (desc ? '' : ' view-desc-empty') }, [desc || 'No description.']);
+    const descBox = desc
+      ? el('div', { class: 'view-desc md', html: mdToHtml(desc) })
+      : el('div', { class: 'view-desc view-desc-empty' }, ['No description.']);
 
     body.append(...[
       header,
