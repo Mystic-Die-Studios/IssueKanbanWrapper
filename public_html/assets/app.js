@@ -865,11 +865,15 @@
 
   // ---- relationships section (native GitHub sub-issues + dependencies) ----
   function buildRelationsSection(it, readOnly) {
+    // label = what the listed issues ARE relative to THIS issue. 'parent' shows
+    // this issue's parent (this issue is the sub-issue); 'child' shows this
+    // issue's sub-issues (this issue is the parent). Earlier wording ("Parent
+    // of" / "Child of") read backwards and made it easy to create them inverted.
     const TYPES = [
-      { type: 'parent',    label: 'Parent of',  add: 'Set',  placeholder: 'parent #' },
-      { type: 'child',     label: 'Child of',   add: 'Add',  placeholder: 'sub-issue #' },
-      { type: 'blockedBy', label: 'Blocked by', add: 'Add',  placeholder: 'issue #' },
-      { type: 'blocking',  label: 'Blocking',   add: 'Add',  placeholder: 'issue #' },
+      { type: 'parent',    label: 'Parent (this is a sub-issue of)', add: 'Set parent',  placeholder: 'parent #' },
+      { type: 'child',     label: 'Sub-issues (nested under this)',  add: 'Add sub-issue', placeholder: 'sub-issue #' },
+      { type: 'blockedBy', label: 'Blocked by',                      add: 'Add',           placeholder: 'issue #' },
+      { type: 'blocking',  label: 'Blocking',                        add: 'Add',           placeholder: 'issue #' },
     ];
     const wrap = el('div', { class: 'rel-body' }, [el('span', { class: 'bar-hint', text: 'Loading…' })]);
 
