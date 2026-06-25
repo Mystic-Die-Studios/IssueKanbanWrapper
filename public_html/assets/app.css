@@ -144,8 +144,15 @@ html, body {
 .dep-blocked { background: var(--danger); color: #fff; }
 .dep-blocking { background: #9e6a03; color: #fff; }
 
-/* a sub-issue nested under its parent: indent + a connector down the left edge */
-.card-child { position: relative; border-left: 3px solid var(--accent); }
+/* sub-issues embedded inside their parent card as compact rows */
+.card-subissues { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; }
+.card-subissues .card-subissues { margin-top: 3px; margin-left: 12px; padding-top: 3px; border-top: none; border-left: 2px solid var(--border); padding-left: 8px; }
+.subissue { display: flex; align-items: center; gap: 6px; padding: 3px 7px; border-radius: 5px; background: var(--panel); font-size: 12px; cursor: pointer; }
+.subissue:hover { background: var(--bg); outline: 1px solid var(--accent); }
+.subissue-num { color: var(--muted); flex-shrink: 0; }
+.subissue-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.subissue-done .subissue-title { text-decoration: line-through; color: var(--muted); }
+.subissue-flag { flex-shrink: 0; font-size: 11px; }
 .card-labels { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
 .label { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid; }
 .label-team { color: #fff; font-weight: 600; }

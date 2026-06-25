@@ -378,30 +378,53 @@
     const pts = col.items.reduce((s, it) => s + (itemPoints(it) || 0), 0);
     const body = el('div', { class: 'col-body', 'data-option': col.optionId || '' });
 
-    // Nest sub-issues under their parent when both sit in this column; children
-    // whose parent is elsewhere render at the top level (with a "↳ #parent" hint).
+    // Sub-issues whose parent is also in this column are embedded as compact
+    // rows INSIDE the parent card (no full card of their own). Children whose
+    // parent is elsewhere render as normal cards (with a "↳ #parent" hint).
     const inCol = new Set(col.items.map(itemKey));
     const childrenOf = new Map();
-    const roots = [];
+    const nested = new Set(); // keys embedded inside a parent in this column
     col.items.forEach((it) => {
       const pk = parentKey(it);
       if (pk && pk !== itemKey(it) && inCol.has(pk)) {
         if (!childrenOf.has(pk)) childrenOf.set(pk, []);
         childrenOf.get(pk).push(it);
-      } else {
-        roots.push(it);
+        nested.add(itemKey(it));
       }
     });
-    const placed = new Set();
-    const place = (it, depth) => {
-      const k = itemKey(it);
-      if (placed.has(k)) return; // guard against relationship cycles
-      placed.add(k);
-      body.appendChild(renderCard(it, depth));
-      (childrenOf.get(k) || []).forEach((c) => place(c, depth + 1));
+
+    const seen = new Set();
+    const subList = (it) => {
+      const kids = childrenOf.get(itemKey(it)) || [];
+      const rows = [];
+      kids.forEach((c) => {
+        const k = itemKey(c);
+        if (seen.has(k)) return; // cycle guard
+        seen.add(k);
+        const row = el('div', { class: 'subissue' + (isDone(c) ? ' subissue-done' : ''), title: c.title }, [
+          el('span', { class: 'subissue-num', text: '#' + c.number }),
+          el('span', { class: 'subissue-title', text: c.title }),
+          c.blockedBy > 0 ? el('span', { class: 'subissue-flag', title: 'Blocked', text: '⛔' }) : null,
+          c.blocking > 0 ? el('span', { class: 'subissue-flag', title: 'Blocking', text: '⚠' }) : null,
+        ].filter(Boolean));
+        row.addEventListener('click', (e) => { e.stopPropagation(); openCardModal(c); });
+        rows.push(row);
+        const deeper = subList(c); // grandchildren nest further inside
+        if (deeper) rows.push(deeper);
+      });
+      return rows.length ? el('div', { class: 'card-subissues' }, rows) : null;
     };
-    roots.forEach((it) => place(it, 0));
-    col.items.forEach((it) => { if (!placed.has(itemKey(it))) place(it, 0); }); // any left by a cycle
+
+    col.items.forEach((it) => {
+      if (nested.has(itemKey(it)) || seen.has(itemKey(it))) return; // embedded in a parent
+      seen.add(itemKey(it));
+      const card = renderCard(it);
+      const sub = subList(it);
+      if (sub) card.appendChild(sub);
+      body.appendChild(card);
+    });
+    // any items orphaned by a relationship cycle: render flat so nothing vanishes
+    col.items.forEach((it) => { if (!seen.has(itemKey(it))) { seen.add(itemKey(it)); body.appendChild(renderCard(it)); } });
 
     body.addEventListener('dragover', (e) => { e.preventDefault(); body.classList.add('drag-over'); });
     body.addEventListener('dragleave', () => body.classList.remove('drag-over'));
@@ -421,9 +444,8 @@
     ]);
   }
 
-  function renderCard(it, depth = 0) {
-    const card = el('div', { class: 'card' + (depth > 0 ? ' card-child' : ''), draggable: 'true' });
-    if (depth > 0) card.style.marginLeft = (depth * 18) + 'px';
+  function renderCard(it) {
+    const card = el('div', { class: 'card', draggable: 'true' });
     card.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('text/itemId', it.itemId);
       card.classList.add('dragging');
