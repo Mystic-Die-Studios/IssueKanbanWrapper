@@ -42,10 +42,35 @@ $milestones = array_map(
     rest_all("/repos/{$repo}/milestones?state=open")
 );
 
-$assignees = array_map(
-    fn($u) => ['login' => $u['login'], 'avatarUrl' => $u['avatar_url'] ?? null],
-    rest_all("/repos/{$repo}/assignees")
-);
+// Assignable users via GraphQL so we get each user's profile display name
+// (the REST /assignees endpoint only returns login + avatar).
+[$owner, $name] = explode('/', $repo, 2);
+$assignees = [];
+$after = null;
+for ($page = 1; $page <= 5; $page++) {
+    $data = gql(
+        'query($owner:String!, $name:String!, $after:String) {
+          repository(owner:$owner, name:$name) {
+            assignableUsers(first: 100, after: $after) {
+              pageInfo { hasNextPage endCursor }
+              nodes { login name avatarUrl }
+            }
+          }
+        }',
+        ['owner' => $owner, 'name' => $name, 'after' => $after]
+    );
+    $conn = $data['repository']['assignableUsers'] ?? null;
+    if (!$conn) {
+        break;
+    }
+    foreach ($conn['nodes'] as $u) {
+        $assignees[] = ['login' => $u['login'], 'name' => $u['name'] ?? null, 'avatarUrl' => $u['avatarUrl'] ?? null];
+    }
+    if (empty($conn['pageInfo']['hasNextPage'])) {
+        break;
+    }
+    $after = $conn['pageInfo']['endCursor'];
+}
 
 json_out([
     'labels'     => $labels,

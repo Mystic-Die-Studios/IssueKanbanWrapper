@@ -6,7 +6,7 @@
 
   // ---- state ----
   const state = {
-    me: null,            // { login, avatarUrl }
+    me: null,            // { login, name, avatarUrl }
     board: null,         // { config, fields, items }
     view: 'board',       // 'board' | 'stats'
     filterMine: false,
@@ -156,6 +156,9 @@
   // sprint-label helpers (hidden from the normal Labels filter; shown via sprint bar)
   function sprintPrefix() { return cfg().sprintPrefix || 'sprint:'; }
   function isSprintLabel(name) { const p = sprintPrefix(); return !!p && name.indexOf(p) === 0; }
+
+  // Profile display name, falling back to the @login when a user has none set.
+  function personName(p) { return (p && (p.name || p.login)) || ''; }
 
   // ---- avatar (with graceful fallback so empty src never shows a broken icon) ----
   function avatarEl(login, url, opts = {}) {
@@ -552,7 +555,7 @@
     );
 
     const avatars = el('div', { class: 'card-assignees' },
-      it.assignees.map((a) => avatarEl(a.login, a.avatarUrl))
+      it.assignees.map((a) => avatarEl(personName(a), a.avatarUrl))
     );
 
     card.appendChild(el('div', { class: 'card-title', text: it.title }));
@@ -740,7 +743,7 @@
     const wrap = el('div', { class: 'check-grid' }, source.map((u) => {
       const cb = el('input', { type: 'checkbox' });
       cb.checked = currentLogins.has(u.login); cb.dataset.login = u.login;
-      return el('label', { class: 'check-row' }, [cb, avatarEl(u.login, u.avatarUrl), el('span', { text: u.login })]);
+      return el('label', { class: 'check-row' }, [cb, avatarEl(personName(u), u.avatarUrl), el('span', { text: personName(u) })]);
     }));
     if (!source.length) wrap.append(el('div', { class: 'bar-hint', text: 'No assignable users.' }));
     const getChosen = () => $$('input[type=checkbox]', wrap).filter((c) => c.checked).map((c) => c.dataset.login);
@@ -1107,7 +1110,7 @@
     let peopleRow = null;
     if (it.assignees && it.assignees.length) {
       peopleRow = el('div', { class: 'view-people' }, it.assignees.map((a) =>
-        el('span', { class: 'view-person' }, [avatarEl(a.login, a.avatarUrl, { size: 22 }), el('span', { text: a.login })])));
+        el('span', { class: 'view-person' }, [avatarEl(personName(a), a.avatarUrl, { size: 22 }), el('span', { text: personName(a) })])));
     }
 
     // labels (sprint labels are shown via the Sprint chip, not here)
@@ -1599,8 +1602,8 @@
     people.forEach((p) => {
       const unassigned = p.login === '(unassigned)';
       table.appendChild(el('tr', { class: unassigned ? 'row-unassigned' : '' }, [
-        el('td', {}, [avatarEl(unassigned ? 'unassigned' : p.login, p.avatarUrl, { unassigned }),
-          el('span', { text: ' ' + (unassigned ? 'Unassigned' : p.login) })]),
+        el('td', {}, [avatarEl(unassigned ? 'unassigned' : personName(p), p.avatarUrl, { unassigned }),
+          el('span', { text: ' ' + (unassigned ? 'Unassigned' : personName(p)) })]),
         el('td', { text: String(p.doneCount) }),
         el('td', { class: 'strong', text: String(p.donePoints) }),
         el('td', { text: String(p.openCount) }),
@@ -1691,7 +1694,7 @@
           pts != null ? el('span', { class: 'pts-badge', text: pts + ' pts' }) : null,
         ].filter(Boolean)),
       ]),
-      el('div', { class: 'tl-assignees' }, it.assignees.map((a) => avatarEl(a.login, a.avatarUrl))),
+      el('div', { class: 'tl-assignees' }, it.assignees.map((a) => avatarEl(personName(a), a.avatarUrl))),
     ]);
     return row;
   }
@@ -1745,8 +1748,8 @@
       if (!state.me.authenticated) { location.href = '/'; return; }
       const chip = $('#user-chip');
       chip.innerHTML = '';
-      chip.appendChild(avatarEl(state.me.login, state.me.avatarUrl));
-      chip.appendChild(el('span', { text: ' ' + state.me.login }));
+      chip.appendChild(avatarEl(personName(state.me), state.me.avatarUrl));
+      chip.appendChild(el('span', { text: ' ' + personName(state.me) }));
 
       state.board = await api('/api/board.php');
       $('#loading').classList.add('hidden');

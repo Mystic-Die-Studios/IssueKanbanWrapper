@@ -119,7 +119,7 @@ function fetch_items_try(string $projectId, string $rel, ?string $features): ?ar
                   id number title url state body
                   repository { nameWithOwner }
                   milestone { title number }
-                  assignees(first: 10) { nodes { login avatarUrl } }
+                  assignees(first: 10) { nodes { login name avatarUrl } }
                   labels(first: 20) { nodes { name color } }
                   {$rel}
                   issueFieldValues(first: 30) {
@@ -239,7 +239,7 @@ function normalize_item(array $node): array
 
     $assignees = [];
     foreach (($content['assignees']['nodes'] ?? []) as $a) {
-        $assignees[] = ['login' => $a['login'], 'avatarUrl' => $a['avatarUrl'] ?? null];
+        $assignees[] = ['login' => $a['login'], 'name' => $a['name'] ?? null, 'avatarUrl' => $a['avatarUrl'] ?? null];
     }
     $labels = [];
     foreach (($content['labels']['nodes'] ?? []) as $l) {

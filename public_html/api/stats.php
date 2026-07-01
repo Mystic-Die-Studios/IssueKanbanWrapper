@@ -53,12 +53,13 @@ foreach ($items as $it) {
     }
 
     // Attribute to each assignee (unassigned bucketed under "(unassigned)").
-    $assignees = $it['assignees'] ?: [['login' => '(unassigned)', 'avatarUrl' => null]];
+    $assignees = $it['assignees'] ?: [['login' => '(unassigned)', 'name' => null, 'avatarUrl' => null]];
     foreach ($assignees as $a) {
         $login = $a['login'];
         if (!isset($people[$login])) {
             $people[$login] = [
                 'login'       => $login,
+                'name'        => $a['name'] ?? null,
                 'avatarUrl'   => $a['avatarUrl'] ?? null,
                 'doneCount'   => 0,
                 'donePoints'  => 0.0,
