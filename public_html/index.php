@@ -43,8 +43,11 @@ $asset = function (string $path): string {
         <button class="tab" data-view="stats">Stats</button>
       </nav>
       <button id="new-issue-btn" class="btn btn-primary">+ New issue</button>
+      <button id="help-wanted-btn" class="btn btn-help" aria-pressed="false" title="Show only issues labelled help wanted">🆘 Help wanted</button>
     </div>
     <div class="topbar-right">
+      <button id="backfill-btn" class="btn btn-ghost hidden" title="Assign the default milestone to issues that have none"></button>
+      <button id="warn-btn" class="btn btn-warn hidden" title="Issues missing a sprint or points"></button>
       <label class="toggle">
         <input type="checkbox" id="filter-mine"> My issues
       </label>

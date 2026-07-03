@@ -68,4 +68,13 @@ return [
     // (FIELD_SPRINT above is no longer used unless you switch back to an
     // Iteration field; it's kept for reference.)
     'SPRINT_PREFIX'       => 'sprint:',
+
+    // New issues default their Milestone to this (matched by title, case-insensitive).
+    // Also the target milestone for the "backfill missing milestones" action.
+    // Leave '' to disable defaulting/backfill.
+    'DEFAULT_MILESTONE'   => 'Phase 1',
+
+    // The label surfaced as a prominent one-click "Help wanted" filter toggle in
+    // the top bar (matched case-insensitively; also matches "help-wanted").
+    'HELP_WANTED_LABEL'   => 'help wanted',
 ];

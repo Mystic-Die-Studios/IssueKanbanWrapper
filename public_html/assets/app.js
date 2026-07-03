@@ -10,6 +10,7 @@
     board: null,         // { config, fields, items }
     view: 'board',       // 'board' | 'stats'
     filterMine: false,
+    filterHelpWanted: false, // show only "help wanted" issues
     activeLabels: new Set(), // label/team names toggled on (OR; empty => show all)
     sprint: 'all',       // iterationId | 'all'
     metaCache: {},       // repo -> { labels, milestones, assignees }
@@ -146,6 +147,24 @@
   function isDone(it) { return (itemStatusName(it) || '').toLowerCase() === (cfg().statusDone || '').toLowerCase(); }
   // Cancelled / pushed work: counted separately (shown red) so it doesn't read as "done".
   function isCancelled(it) { const s = (itemStatusName(it) || '').toLowerCase(); return s.includes('cancel') || s.includes('push'); }
+  // "help wanted" label match (configurable name; also tolerates the hyphenated form).
+  function helpWantedName() { return (cfg().helpWantedLabel || 'help wanted').toLowerCase(); }
+  function isHelpWantedLabel(name) {
+    const n = String(name || '').toLowerCase();
+    const want = helpWantedName();
+    return n === want || n.replace(/-/g, ' ') === want.replace(/-/g, ' ');
+  }
+  function isHelpWanted(it) { return (it.labels || []).some((l) => isHelpWantedLabel(l.name)); }
+  // The Status option that represents cancelled/pushed work (the column ghosts
+  // live in, and where "leave cancelled" sends a real issue). null if none.
+  function cancelledStatusOption() {
+    return statusOptions().find((o) => { const s = (o.name || '').toLowerCase(); return s.includes('cancel') || s.includes('push'); }) || null;
+  }
+  function boardSnapshots() { return state.board.snapshots || []; }
+  // Website-only snapshots visible in the current sprint scope.
+  function visibleSnapshots() {
+    return boardSnapshots().filter((s) => state.sprint === 'all' || s.sprint === state.sprint);
+  }
   // stable "owner/repo#number" key for matching parent/child relationships
   function itemKey(it) { return (it.repo || '') + '#' + (it.number != null ? it.number : ''); }
   function parentKey(it) { return it.parent && it.parent.number != null ? (it.parent.repo || it.repo) + '#' + it.parent.number : null; }
@@ -181,14 +200,18 @@
   }
 
   // ---- filtering ----
+  // "In view" = every filter EXCEPT the label/team chips. The filter bar counts
+  // are computed over this scope so team/label numbers track the current sprint
+  // (and My-issues / Help-wanted) toggles.
+  function inViewScope(it) {
+    if (state.filterMine && state.me && !it.assignees.some((a) => a.login === state.me.login)) return false;
+    if (state.filterHelpWanted && !isHelpWanted(it)) return false;
+    if (state.sprint !== 'all' && itemSprint(it) !== state.sprint) return false;
+    return true;
+  }
   function visibleItems() {
     return state.board.items.filter((it) => {
-      if (state.filterMine && state.me) {
-        if (!it.assignees.some((a) => a.login === state.me.login)) return false;
-      }
-      if (state.sprint !== 'all') {
-        if (itemSprint(it) !== state.sprint) return false;
-      }
+      if (!inViewScope(it)) return false;
       if (state.activeLabels.size > 0) {
         const names = new Set(it.labels.map((l) => l.name));
         let any = false;
@@ -323,15 +346,19 @@
           renderSprintManager();
         } catch (e) { showError(e.message); }
       } });
+      const rollBtn = el('button', { class: 'btn', text: 'Close & roll over',
+        title: 'Review unfinished issues one by one: push each to another sprint (leaving a website-only copy here) or cancel it',
+        onclick: () => openRollover(s) });
       list.appendChild(el('div', { class: 'sprint-row' }, [
         el('div', { class: 'sprint-row-name' }, [
           isCurrentSprint(s) ? el('span', { class: 'pill-now', text: 'NOW' }) : null,
           el('strong', { text: s.name }),
+          s.closed ? el('span', { class: 'sprint-closed-tag', text: 'closed' }) : null,
         ]),
         el('label', { class: 'sprint-row-field' }, ['Start', start]),
         el('label', { class: 'sprint-row-field' }, ['End', end]),
         el('label', { class: 'sprint-row-field check-row' }, [closed, 'Closed']),
-        el('div', { class: 'sprint-row-actions' }, [saveBtn, delBtn]),
+        el('div', { class: 'sprint-row-actions' }, [rollBtn, saveBtn, delBtn]),
       ]));
     });
     body.appendChild(list);
@@ -361,15 +388,162 @@
     return res;
   }
 
+  // ---- sprint close & roll over ----
+  // Real (non-draft), not-done, not-cancelled issues carrying this sprint's label.
+  function unfinishedInSprint(name) {
+    return (state.board.items || []).filter((it) =>
+      it.number && it.repo && itemSprint(it) === name && !isDone(it) && !isCancelled(it));
+  }
+  // Best default "next" sprint: the earliest one starting after this one, else the newest other.
+  function pickNextSprint(cur, others) {
+    if (!others.length) return '';
+    const start = cur.startDate || '';
+    const after = others.filter((o) => (o.startDate || '') > start).sort((a, b) => (a.startDate || '').localeCompare(b.startDate || ''));
+    if (after.length) return after[0].name;
+    return others.slice().sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''))[0].name;
+  }
+  // Swap an item's sprint label to `sprintName` (or clear with null), updating local state.
+  async function assignSprintLabel(it, sprintName) {
+    const res = await post('/api/sprint-assign.php', { repo: it.repo, number: it.number, labels: it.labels.map((l) => l.name), sprint: sprintName || null });
+    const names = res.labels || [];
+    const known = new Map(it.labels.map((l) => [l.name, l]));
+    it.labels = names.map((n) => known.get(n) || { name: n, color: '5319e7' });
+    it.sprint = sprintName || null;
+  }
+
+  function openRollover(sprint) {
+    $('#modal').classList.remove('hidden');
+    const body = $('#modal-body');
+    const candidates = unfinishedInSprint(sprint.name);
+    const cancelledOpt = cancelledStatusOption();
+    const others = allSprints().filter((x) => x.name !== sprint.name);
+    const nextDefault = pickNextSprint(sprint, others);
+    const tally = { pushed: 0, cancelled: 0, skipped: 0 };
+    let idx = 0;
+    let busy = false;
+
+    const backBtn = el('button', { class: 'btn btn-ghost', text: '‹ Sprints', onclick: renderSprintManager });
+
+    async function advance() { idx++; render(); }
+
+    async function guarded(fn) {
+      if (busy) return;
+      busy = true;
+      try { await fn(); }
+      catch (e) { showError(e.message); }
+      finally { busy = false; }
+    }
+
+    async function finishClose(markClosed) {
+      await guarded(async () => {
+        if (markClosed) await sprintsApi({ op: 'update', name: sprint.name, startDate: sprint.startDate || null, endDate: sprint.endDate || null, closed: true });
+        await refresh();
+        renderSprintManager();
+      });
+    }
+
+    function render() {
+      body.innerHTML = '';
+      body.appendChild(el('div', { class: 'modal-head' }, [
+        el('strong', { text: `Close & roll over — ${sprint.name}` }),
+        el('div', { class: 'modal-head-actions' }, [backBtn, el('button', { class: 'btn btn-ghost', text: '✕', onclick: closeModal })]),
+      ]));
+
+      if (!candidates.length) {
+        body.appendChild(el('div', { class: 'bar-hint', text: 'No unfinished issues in this sprint. You can close it now.' }));
+        body.appendChild(el('div', { class: 'rollover-actions' }, [
+          el('button', { class: 'btn btn-primary', text: 'Mark sprint closed', onclick: () => finishClose(true) }),
+        ]));
+        return;
+      }
+
+      // progress
+      body.appendChild(el('div', { class: 'rollover-progress' }, [
+        el('span', { text: `Reviewing ${Math.min(idx + 1, candidates.length)} of ${candidates.length}` }),
+        el('span', { class: 'bar-hint', text: `pushed ${tally.pushed} · cancelled ${tally.cancelled} · skipped ${tally.skipped}` }),
+      ]));
+
+      if (idx >= candidates.length) {
+        body.appendChild(el('div', { class: 'rollover-done' }, [
+          el('div', { text: `Reviewed all ${candidates.length} issue(s): ${tally.pushed} pushed, ${tally.cancelled} cancelled, ${tally.skipped} skipped.` }),
+          el('div', { class: 'bar-hint', text: 'Pushed issues left a website-only copy in this sprint’s Cancelled/Pushed column.' }),
+        ]));
+        body.appendChild(el('div', { class: 'rollover-actions' }, [
+          el('button', { class: 'btn btn-primary', text: 'Mark sprint closed & finish', onclick: () => finishClose(true) }),
+          el('button', { class: 'btn', text: 'Finish (leave open)', onclick: () => finishClose(false) }),
+        ]));
+        return;
+      }
+
+      const it = candidates[idx];
+
+      // target sprint + status controls for a push
+      const targetSel = el('select', { class: 'inp' }, others.length
+        ? others.map((o) => el('option', { value: o.name, text: o.name }))
+        : [el('option', { value: '', text: '— no other sprint —' })]);
+      if (nextDefault) targetSel.value = nextDefault;
+      const statusSel = el('select', { class: 'inp' }, statusOptions().map((o) => el('option', { value: o.id, text: o.name })));
+      // default the push status to the first (leftmost / Todo) column
+      if (statusOptions()[0]) statusSel.value = statusOptions()[0].id;
+
+      const pts = itemPoints(it);
+      const card = el('div', { class: 'rollover-card' }, [
+        el('div', { class: 'rollover-card-title', text: (it.number ? '#' + it.number + ' ' : '') + it.title }),
+        el('div', { class: 'card-meta' }, [
+          pts != null ? el('span', { class: 'pts-badge', text: pts + ' pts' }) : null,
+          el('span', { class: 'card-status', text: itemStatusName(it) || '(no status)' }),
+        ].filter(Boolean)),
+        el('div', { class: 'card-assignees' }, it.assignees.map((a) => avatarEl(personName(a), a.avatarUrl))),
+      ]);
+
+      const pushRow = el('div', { class: 'rollover-push' }, [
+        el('span', { class: 'field-label', text: 'Push to' }), targetSel,
+        el('span', { class: 'field-label', text: 'as' }), statusSel,
+        el('button', { class: 'btn btn-primary', text: 'Push →', disabled: others.length ? undefined : 'disabled',
+          onclick: () => guarded(async () => {
+            const target = targetSel.value;
+            if (!target) { showError('No sprint to push to — create one first.'); return; }
+            // 1) frozen website-only copy stays in this sprint's cancelled/pushed column
+            const r = await post('/api/snapshot.php', { op: 'add', snapshot: {
+              sprint: sprint.name, repo: it.repo, number: it.number, title: it.title,
+              points: pts, url: it.url, assignees: it.assignees, pushedTo: target,
+            } });
+            state.board.snapshots = r.snapshots || [];
+            // 2) move the real issue forward + reset its status
+            await assignSprintLabel(it, target);
+            if (statusSel.value) await moveCard(it.itemId, statusSel.value);
+            tally.pushed++; advance();
+          }) }),
+      ]);
+
+      const actions = el('div', { class: 'rollover-actions' }, [
+        cancelledOpt
+          ? el('button', { class: 'btn btn-danger', text: 'Leave cancelled',
+              title: 'Set the real issue to ' + cancelledOpt.name + ' and keep it in this sprint',
+              onclick: () => guarded(async () => { await moveCard(it.itemId, cancelledOpt.id); tally.cancelled++; advance(); }) })
+          : el('span', { class: 'bar-hint', text: 'No Cancelled/Pushed status on the board — add one to enable cancelling.' }),
+        el('button', { class: 'btn', text: 'Skip', onclick: () => { tally.skipped++; advance(); } }),
+      ]);
+
+      body.append(card, pushRow, actions);
+    }
+
+    render();
+  }
+
   // ---- filter bar: Teams (prefix) vs Labels, visually separated ----
   function renderFilterBar() {
     const bar = $('#filter-bar');
     bar.innerHTML = '';
+    // Counts reflect the current sprint / My-issues / Help-wanted scope so the
+    // numbers next to each team & label track what you're actually viewing.
     const counts = new Map();
-    state.board.items.forEach((it) => it.labels.forEach((l) => {
+    state.board.items.filter(inViewScope).forEach((it) => it.labels.forEach((l) => {
       if (isSprintLabel(l.name)) return; // sprint labels are handled by the sprint bar
       counts.set(l.name, (counts.get(l.name) || 0) + 1);
     }));
+    // Keep any active-but-now-zero label visible so you can still toggle it off.
+    state.activeLabels.forEach((n) => { if (!counts.has(n)) counts.set(n, 0); });
     if (counts.size === 0) return;
 
     const names = Array.from(counts.keys());
@@ -410,6 +584,93 @@
     });
   }
 
+  // ---- data-hygiene warnings (top-right ⚠ button) ----
+  // Open, real issues that are missing a sprint assignment or story/sprint points.
+  // Done and cancelled work is finished, so it's excluded.
+  function warningItems() {
+    return (state.board.items || []).filter((it) => {
+      if (!it.number || !it.repo) return false;                 // skip drafts
+      if (String(it.state || '').toUpperCase() === 'CLOSED') return false;
+      if (isDone(it) || isCancelled(it)) return false;
+      const noSprint = !itemSprint(it);
+      const noPoints = !!cfg().pointsField && !(itemPoints(it) > 0);
+      return noSprint || noPoints;
+    });
+  }
+  function renderWarnBtn() {
+    const btn = $('#warn-btn');
+    if (!btn) return;
+    const items = warningItems();
+    btn.classList.toggle('hidden', items.length === 0);
+    btn.textContent = `⚠ ${items.length} need${items.length === 1 ? 's' : ''} sprint/points`;
+    btn.onclick = openWarningsModal;
+  }
+  function openWarningsModal() {
+    const items = warningItems();
+    $('#modal').classList.remove('hidden');
+    const body = $('#modal-body');
+    body.innerHTML = '';
+    const rows = items.map((it) => {
+      const miss = [];
+      if (!itemSprint(it)) miss.push('no sprint');
+      if (cfg().pointsField && !(itemPoints(it) > 0)) miss.push('no points');
+      const row = el('div', { class: 'warn-row', onclick: () => openCardModal(it) }, [
+        el('span', { class: 'warn-row-title', text: (it.number ? '#' + it.number + ' ' : '') + it.title }),
+        el('span', { class: 'warn-row-tags', text: miss.join(' · ') }),
+      ]);
+      return row;
+    });
+    body.append(...[
+      modalHeader(el('strong', { text: `Needs attention — ${items.length} issue${items.length === 1 ? '' : 's'}` })),
+      el('div', { class: 'bar-hint', text: 'Open issues with no sprint assignment or no points. Click one to fix it.' }),
+      el('div', { class: 'warn-list' }, rows),
+    ]);
+  }
+
+  // ---- milestone backfill (top-right button, only when there's work to do) ----
+  function missingMilestoneCount() {
+    if (!cfg().defaultMilestone) return 0;
+    return (state.board.items || []).filter((it) =>
+      it.number && it.repo && String(it.state || '').toUpperCase() !== 'CLOSED' && !it.milestone).length;
+  }
+  function renderBackfillBtn() {
+    const btn = $('#backfill-btn');
+    if (!btn) return;
+    const n = missingMilestoneCount();
+    btn.classList.toggle('hidden', n === 0);
+    btn.textContent = `◎ Set ${cfg().defaultMilestone} (${n})`;
+    btn.onclick = runBackfill;
+  }
+  async function runBackfill() {
+    const ms = cfg().defaultMilestone;
+    const n = missingMilestoneCount();
+    if (!window.confirm(`Assign the "${ms}" milestone to ${n} issue(s) that currently have none?\n\nRepos without a "${ms}" milestone are skipped.`)) return;
+    const btn = $('#backfill-btn');
+    btn.disabled = true; const old = btn.textContent; btn.textContent = '◎ Working…';
+    try {
+      const res = await post('/api/milestone-backfill.php', {});
+      let msg = `Assigned "${ms}" to ${res.updated} issue(s).`;
+      if (res.skippedNoMilestone) msg += `\nSkipped ${res.skippedNoMilestone} (their repo has no "${ms}" milestone: ${(res.missingRepos || []).join(', ')}).`;
+      await refresh();
+      window.alert(msg);
+    } catch (e) {
+      showError(e.message);
+    } finally { btn.disabled = false; btn.textContent = old; }
+  }
+
+  // ---- help-wanted toggle ----
+  function renderHelpWantedBtn() {
+    const btn = $('#help-wanted-btn');
+    if (!btn) return;
+    const n = (state.board.items || []).filter(isHelpWanted).length;
+    btn.classList.toggle('on', state.filterHelpWanted);
+    btn.setAttribute('aria-pressed', state.filterHelpWanted ? 'true' : 'false');
+    btn.textContent = `🆘 Help wanted${n ? ' (' + n + ')' : ''}`;
+  }
+
+  // Update all top-bar status affordances at once.
+  function renderTopControls() { renderWarnBtn(); renderBackfillBtn(); renderHelpWantedBtn(); }
+
   // ---- board ----
   function renderBoard() {
     const root = $('#board-view');
@@ -428,6 +689,14 @@
 
     const columns = opts.map((o) => ({ name: o.name, optionId: o.id, items: buckets.get(o.name) }));
     if (noStatus.length) columns.push({ name: '(no status)', optionId: null, items: noStatus });
+
+    // Website-only snapshots (frozen copies of pushed issues) live in the
+    // Cancelled/Pushed column for the sprint they were pushed out of.
+    const cancelledOpt = cancelledStatusOption();
+    if (cancelledOpt) {
+      const col = columns.find((c) => c.optionId === cancelledOpt.id);
+      if (col) col.ghosts = visibleSnapshots();
+    }
 
     columns.forEach((col) => root.appendChild(renderColumn(col)));
   }
@@ -483,6 +752,13 @@
     });
     // any items orphaned by a relationship cycle: render flat so nothing vanishes
     col.items.forEach((it) => { if (!seen.has(itemKey(it))) { seen.add(itemKey(it)); body.appendChild(renderCard(it)); } });
+
+    // Website-only snapshots, rendered read-only below the real cards.
+    const ghosts = col.ghosts || [];
+    if (ghosts.length) {
+      body.appendChild(el('div', { class: 'ghost-sep', text: 'Pushed out · website-only' }));
+      ghosts.forEach((g) => body.appendChild(renderGhostCard(g)));
+    }
 
     body.addEventListener('dragover', (e) => { e.preventDefault(); body.classList.add('drag-over'); });
     body.addEventListener('dragleave', () => body.classList.remove('drag-over'));
@@ -570,6 +846,27 @@
     if (fieldChips) card.appendChild(fieldChips);
     if (sortedLabels.length) card.appendChild(labels);
     if (it.assignees.length) card.appendChild(avatars);
+    return card;
+  }
+
+  // Read-only "ghost" card for a website-only snapshot of a pushed issue.
+  function renderGhostCard(snap) {
+    const card = el('div', { class: 'card ghost-card', title: 'Website-only snapshot (not on GitHub)' });
+    card.appendChild(el('div', { class: 'card-title', text: (snap.number ? '#' + snap.number + ' ' : '') + snap.title }));
+    card.appendChild(el('div', { class: 'card-meta' }, [
+      el('span', { class: 'ghost-badge', text: '👻 pushed' + (snap.pushedTo ? ' → ' + snap.pushedTo : '') }),
+      (snap.points != null) ? el('span', { class: 'pts-badge', text: snap.points + ' pts' }) : null,
+    ].filter(Boolean)));
+    const avatars = el('div', { class: 'card-assignees' }, (snap.assignees || []).map((a) => avatarEl(personName(a), a.avatarUrl)));
+    const del = el('button', { class: 'ghost-del', title: 'Remove this website-only snapshot', text: '✕',
+      onclick: async (e) => {
+        e.stopPropagation();
+        if (!confirm('Remove this website-only snapshot? (The real issue is not affected.)')) return;
+        try { const r = await post('/api/snapshot.php', { op: 'delete', id: snap.id }); state.board.snapshots = r.snapshots || []; renderBoard(); }
+        catch (err) { showError(err.message); }
+      } });
+    card.appendChild(el('div', { class: 'ghost-foot' }, [avatars, del]));
+    if (snap.url) card.addEventListener('click', () => window.open(snap.url, '_blank', 'noopener'));
     return card;
   }
 
@@ -1477,7 +1774,11 @@
       dyn.innerHTML = '';
       labelSecs = buildLabelSections(meta.labels, new Set());
       asgSecs = buildAssigneeSection(meta.assignees, new Set());
-      msSel = buildMilestoneSelect(meta.milestones, null);
+      // Default the milestone to the configured phase (e.g. "Phase 1") when the
+      // repo has a milestone with that title.
+      const def = (cfg().defaultMilestone || '').toLowerCase();
+      const defMs = def ? meta.milestones.find((m) => (m.title || '').toLowerCase() === def) : null;
+      msSel = buildMilestoneSelect(meta.milestones, defMs || null);
       dyn.append(
         fieldRow('Milestone', msSel),
         el('div', { class: 'field-row' }, [el('div', { class: 'field-label', text: 'Labels' }), labelSecs.wrap]),
@@ -1577,12 +1878,17 @@
     root.appendChild(el('h2', { class: 'stats-scope', text: 'Stats — ' + scopeLabel }));
 
     const t = data.totals;
-    root.appendChild(el('div', { class: 'stats-totals' }, [
+    const totalsCards = [
       statCard('Completed', `${t.doneCount} tasks`),
       statCard('Completed points', `${t.donePoints}`),
       statCard('Open', `${t.openCount} tasks`),
       statCard('Open points', `${t.openPoints}`),
-    ]));
+    ];
+    if (t.cancelledCount) {
+      totalsCards.push(statCard('Cancelled/Pushed', `${t.cancelledCount} tasks`, 'stat-cancelled'));
+      totalsCards.push(statCard('Cancelled points', `${t.cancelledPoints}`, 'stat-cancelled'));
+    }
+    root.appendChild(el('div', { class: 'stats-totals' }, totalsCards));
 
     // unassigned always sorted last
     const people = data.perPerson.slice().sort((a, b) => {
@@ -1591,11 +1897,21 @@
       return (ua - ub) || (b.donePoints - a.donePoints) || (b.doneCount - a.doneCount);
     });
 
+    // Commits × points graph (commits fetched separately so the table shows fast).
+    const chartHost = el('div', { class: 'stats-chart-host' }, [el('div', { class: 'loading', text: 'Loading commit activity…' })]);
+    root.appendChild(el('div', { class: 'stats-section' }, [
+      el('h3', { class: 'stats-h3', text: 'Commits & points per person' }),
+      chartHost,
+    ]));
+
+    const anyCancelled = people.some((p) => p.cancelledCount);
     const table = el('table', { class: 'stats-table' });
     table.appendChild(el('tr', {}, [
       el('th', { text: 'Person' }), el('th', { text: 'Done' }), el('th', { text: 'Done pts' }),
-      el('th', { text: 'Open' }), el('th', { text: 'Open pts' }), el('th', { text: 'Total pts' }),
-    ]));
+      el('th', { text: 'Open' }), el('th', { text: 'Open pts' }),
+      anyCancelled ? el('th', { text: 'Cancelled' }) : null,
+      el('th', { text: 'Total pts' }),
+    ].filter(Boolean)));
     people.forEach((p) => {
       const unassigned = p.login === '(unassigned)';
       table.appendChild(el('tr', { class: unassigned ? 'row-unassigned' : '' }, [
@@ -1605,13 +1921,67 @@
         el('td', { class: 'strong', text: String(p.donePoints) }),
         el('td', { text: String(p.openCount) }),
         el('td', { text: String(p.openPoints) }),
+        anyCancelled ? el('td', { class: 'cell-cancelled', text: p.cancelledCount ? `${p.cancelledCount} · ${p.cancelledPoints} pts` : '—' }) : null,
         el('td', { text: String(p.totalPoints) }),
-      ]));
+      ].filter(Boolean)));
     });
     root.appendChild(table);
+
+    // Fetch commit activity and render the graph (points come from the stats we
+    // already have; commits from the contributions endpoint). Done after the
+    // table so a slow commit scan never blocks the numbers.
+    const pointsByLogin = new Map(people.filter((p) => p.login !== '(unassigned)').map((p) => [p.login, p]));
+    api('/api/contributions.php?sprint=' + encodeURIComponent(state.sprint))
+      .then((c) => renderContribChart(chartHost, pointsByLogin, c))
+      .catch((e) => { chartHost.innerHTML = ''; chartHost.appendChild(el('div', { class: 'bar-hint', text: 'Could not load commit activity: ' + e.message })); });
   }
-  function statCard(label, value) {
-    return el('div', { class: 'stat-card' }, [el('div', { class: 'stat-value', text: value }), el('div', { class: 'stat-label', text: label })]);
+
+  // Grouped horizontal bar chart: per person, a commits bar and a points bar.
+  // Each series is scaled to its own max (commits and points aren't comparable
+  // units) and labelled with the raw value.
+  function renderContribChart(host, pointsByLogin, contrib) {
+    host.innerHTML = '';
+    const byLogin = new Map();
+    const upsert = (login, name, avatarUrl) => {
+      if (!byLogin.has(login)) byLogin.set(login, { login, name: name || login, avatarUrl: avatarUrl || null, commits: 0, points: 0 });
+      return byLogin.get(login);
+    };
+    (contrib.perPerson || []).forEach((p) => { const r = upsert(p.login, p.name, p.avatarUrl); r.commits = p.commits || 0; });
+    pointsByLogin.forEach((p, login) => { const r = upsert(login, personName(p), p.avatarUrl); r.points = p.totalPoints || 0; });
+
+    const rows = Array.from(byLogin.values())
+      .filter((r) => r.commits > 0 || r.points > 0)
+      .sort((a, b) => (b.commits - a.commits) || (b.points - a.points));
+
+    if (!rows.length) { host.appendChild(el('div', { class: 'bar-hint', text: 'No commits or points in this scope.' })); return; }
+
+    const maxC = Math.max(1, ...rows.map((r) => r.commits));
+    const maxP = Math.max(1, ...rows.map((r) => r.points));
+
+    host.appendChild(el('div', { class: 'chart-legend' }, [
+      el('span', { class: 'chart-key' }, [el('span', { class: 'chart-swatch swatch-commits' }), el('span', { text: 'Commits' })]),
+      el('span', { class: 'chart-key' }, [el('span', { class: 'chart-swatch swatch-points' }), el('span', { text: 'Points' })]),
+    ]));
+
+    const chart = el('div', { class: 'contrib-chart' });
+    rows.forEach((r) => {
+      const bar = (val, max, cls) => el('div', { class: 'contrib-track' }, [
+        el('div', { class: 'contrib-bar ' + cls, style: `width:${Math.round((val / max) * 100)}%` }),
+        el('span', { class: 'contrib-val', text: String(val) }),
+      ]);
+      chart.appendChild(el('div', { class: 'contrib-row' }, [
+        el('div', { class: 'contrib-name' }, [avatarEl(r.name, r.avatarUrl, { size: 18 }), el('span', { text: ' ' + r.name })]),
+        el('div', { class: 'contrib-bars' }, [bar(r.commits, maxC, 'bar-commits'), bar(r.points, maxP, 'bar-points')]),
+      ]));
+    });
+    host.appendChild(chart);
+
+    if (contrib.truncated) host.appendChild(el('div', { class: 'bar-hint', text: 'Commit counts are a lower bound (very active repos are page-capped).' }));
+    else if (contrib.range) host.appendChild(el('div', { class: 'bar-hint', text: 'Commits within the selected sprint’s dates.' }));
+  }
+
+  function statCard(label, value, extra) {
+    return el('div', { class: 'stat-card' + (extra ? ' ' + extra : '') }, [el('div', { class: 'stat-value', text: value }), el('div', { class: 'stat-label', text: label })]);
   }
 
   // ---- timeline view (issues by due date) ----
@@ -1720,7 +2090,7 @@
     const old = btn.textContent; btn.textContent = '↻ …'; btn.disabled = true;
     try {
       state.board = await api('/api/board.php');
-      renderSprintBar(); renderFilterBar(); renderBoard();
+      renderSprintBar(); renderFilterBar(); renderBoard(); renderTopControls();
       if (state.view === 'stats') await renderStats();
     } catch (e) { showError(e.message); }
     finally { btn.textContent = old; btn.disabled = false; }
@@ -1759,12 +2129,18 @@
       renderSprintBar();
       renderFilterBar();
       renderBoard();
+      renderTopControls();
     } catch (e) {
       $('#loading').classList.add('hidden');
       showError('Failed to load: ' + e.message);
     }
 
     $('#filter-mine').addEventListener('change', (e) => { state.filterMine = e.target.checked; rerender(); });
+    $('#help-wanted-btn').addEventListener('click', () => {
+      state.filterHelpWanted = !state.filterHelpWanted;
+      renderHelpWantedBtn();
+      rerender();
+    });
     $('#refresh-btn').addEventListener('click', refresh);
     $('#new-issue-btn').addEventListener('click', () => openCreateModal());
     $$('.tab').forEach((t) => t.addEventListener('click', () => setView(t.dataset.view)));

@@ -362,6 +362,8 @@ function fetch_board(): array
             'statusDone'    => config('STATUS_DONE'),
             'teamPrefix'    => config('TEAM_PREFIX', 'team:'),
             'sprintPrefix'  => $prefix,
+            'defaultMilestone' => config('DEFAULT_MILESTONE', ''),
+            'helpWantedLabel'  => config('HELP_WANTED_LABEL', 'help wanted'),
             'projectTitle'  => $info['title'],
             'projectUrl'    => $info['url'],
         ],
@@ -369,6 +371,7 @@ function fetch_board(): array
         'issueFields' => $issueFieldDefs,   // name => {id, type} for GitHub Issue fields
         'items'       => $items,
         'sprints'     => sprints_get($projectId),
+        'snapshots'   => snapshots_get($projectId),
     ];
 }
 
