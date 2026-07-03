@@ -585,16 +585,23 @@
   }
 
   // ---- data-hygiene warnings (top-right ⚠ button) ----
-  // Open, real issues that are missing a sprint assignment or story/sprint points.
-  // Done and cancelled work is finished, so it's excluded.
+  // Open, real issues missing a sprint, points, or a date. Done and cancelled
+  // work is finished, so it's excluded. Each check is gated on the relevant
+  // field actually existing on the board.
+  function itemMissing(it) {
+    const miss = [];
+    if (!itemSprint(it)) miss.push('no sprint');
+    if (cfg().pointsField && !(itemPoints(it) > 0)) miss.push('no points');
+    if (cfg().startField && !itemStart(it)) miss.push('no start date');
+    if (cfg().dueField && !itemDue(it)) miss.push('no due date');
+    return miss;
+  }
   function warningItems() {
     return (state.board.items || []).filter((it) => {
       if (!it.number || !it.repo) return false;                 // skip drafts
       if (String(it.state || '').toUpperCase() === 'CLOSED') return false;
       if (isDone(it) || isCancelled(it)) return false;
-      const noSprint = !itemSprint(it);
-      const noPoints = !!cfg().pointsField && !(itemPoints(it) > 0);
-      return noSprint || noPoints;
+      return itemMissing(it).length > 0;
     });
   }
   function renderWarnBtn() {
@@ -602,7 +609,7 @@
     if (!btn) return;
     const items = warningItems();
     btn.classList.toggle('hidden', items.length === 0);
-    btn.textContent = `⚠ ${items.length} need${items.length === 1 ? 's' : ''} sprint/points`;
+    btn.textContent = `⚠ ${items.length} need${items.length === 1 ? 's' : ''} attention`;
     btn.onclick = openWarningsModal;
   }
   function openWarningsModal() {
@@ -610,19 +617,13 @@
     $('#modal').classList.remove('hidden');
     const body = $('#modal-body');
     body.innerHTML = '';
-    const rows = items.map((it) => {
-      const miss = [];
-      if (!itemSprint(it)) miss.push('no sprint');
-      if (cfg().pointsField && !(itemPoints(it) > 0)) miss.push('no points');
-      const row = el('div', { class: 'warn-row', onclick: () => openCardModal(it) }, [
-        el('span', { class: 'warn-row-title', text: (it.number ? '#' + it.number + ' ' : '') + it.title }),
-        el('span', { class: 'warn-row-tags', text: miss.join(' · ') }),
-      ]);
-      return row;
-    });
+    const rows = items.map((it) => el('div', { class: 'warn-row', onclick: () => openCardModal(it) }, [
+      el('span', { class: 'warn-row-title', text: (it.number ? '#' + it.number + ' ' : '') + it.title }),
+      el('span', { class: 'warn-row-tags', text: itemMissing(it).join(' · ') }),
+    ]));
     body.append(...[
       modalHeader(el('strong', { text: `Needs attention — ${items.length} issue${items.length === 1 ? '' : 's'}` })),
-      el('div', { class: 'bar-hint', text: 'Open issues with no sprint assignment or no points. Click one to fix it.' }),
+      el('div', { class: 'bar-hint', text: 'Open issues missing a sprint, points, or a date. Click one to fix it.' }),
       el('div', { class: 'warn-list' }, rows),
     ]);
   }
@@ -2079,6 +2080,7 @@
 
   // re-render whichever view is active (used after filter/sprint changes)
   function rerender() {
+    renderFilterBar(); // team/label counts track the current sprint & toggles
     renderBoard();
     if (state.view === 'timeline') renderTimeline();
     else if (state.view === 'stats') renderStats();
