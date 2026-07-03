@@ -587,13 +587,17 @@
   // ---- data-hygiene warnings (top-right ⚠ button) ----
   // Open, real issues missing a sprint, points, or a date. Done and cancelled
   // work is finished, so it's excluded. Each check is gated on the relevant
-  // field actually existing on the board.
+  // field actually existing on the board. Backlog items are unscheduled by
+  // definition, so their missing start/due dates are not flagged.
+  function isBacklog(it) { return (itemStatusName(it) || '').toLowerCase().includes('backlog'); }
   function itemMissing(it) {
     const miss = [];
     if (!itemSprint(it)) miss.push('no sprint');
     if (cfg().pointsField && !(itemPoints(it) > 0)) miss.push('no points');
-    if (cfg().startField && !itemStart(it)) miss.push('no start date');
-    if (cfg().dueField && !itemDue(it)) miss.push('no due date');
+    if (!isBacklog(it)) {
+      if (cfg().startField && !itemStart(it)) miss.push('no start date');
+      if (cfg().dueField && !itemDue(it)) miss.push('no due date');
+    }
     return miss;
   }
   function warningItems() {
@@ -987,16 +991,16 @@
   // Real issues currently on the board (for relationship dropdown pickers).
   // Identify issues by having both a number and a repo (draft issues have
   // neither); we deliberately don't gate on the `type` string, which isn't
-  // reliable across boards. Excludes the given item, pull requests, closed
-  // issues, and (when a sprint is selected) issues outside the current sprint.
+  // reliable across boards. Excludes the given item, pull requests, and closed
+  // issues. NOT sprint-filtered: blocked-by / blocking (and parent/sub-issue)
+  // relationships routinely cross sprints, so the picker must offer every open
+  // board issue regardless of which sprint is currently in view.
   function boardIssueOptions(it) {
-    const sprintFilter = state.sprint && state.sprint !== 'all' ? state.sprint : null;
     return (state.board.items || [])
       .filter((x) => x.number && x.repo && x.type !== 'PullRequest'
         && String(x.state || '').toUpperCase() !== 'CLOSED'
-        && (!sprintFilter || itemSprint(x) === sprintFilter)
         && !(x.repo === it.repo && x.number === it.number))
-      .map((x) => ({ repo: x.repo, number: x.number, title: x.title || '' }))
+      .map((x) => ({ repo: x.repo, number: x.number, title: x.title || '', sprint: itemSprint(x) }))
       .sort((a, b) => (a.repo === b.repo ? a.number - b.number : a.repo.localeCompare(b.repo)));
   }
   function buildStatusSelect(currentOptionId) {
@@ -1237,7 +1241,9 @@
       await post('/api/relation-set.php', {
         repo: it.repo, number: it.number, targetRepo: ref.repo, targetNumber: ref.number, type, op,
       });
-      await refresh(); // a relationship change is an edit too; re-sync the board
+      // The relationship is now saved on GitHub. Re-sync the board, but don't let
+      // a refresh hiccup surface as if the relationship itself failed.
+      try { await refresh(); } catch (e) { console.error('board refresh after relationship change failed', e); }
     }
 
     function chip(r, type) {
@@ -1264,7 +1270,7 @@
         const opts = boardIssueOptions(it);
         if (!opts.length) return el('span', { class: 'bar-hint', text: 'No other board issues to link.' });
         const sel = el('select', { class: 'inp rel-input' }, [el('option', { value: '', text: '— pick an issue —' })]
-          .concat(opts.map((o) => el('option', { value: o.repo + '#' + o.number, text: '#' + o.number + ' ' + o.title }))));
+          .concat(opts.map((o) => el('option', { value: o.repo + '#' + o.number, text: '#' + o.number + ' ' + o.title + (o.sprint ? ' · ' + o.sprint : '') }))));
         const addBtn = el('button', { class: 'btn', text: t.add, onclick: async () => {
           const ref = parseIssueRef(sel.value, it.repo);
           if (!ref) { showError('Pick an issue first'); return; }
@@ -1680,7 +1686,7 @@
         });
         const controls = opts.length ? (() => {
           const sel = el('select', { class: 'inp rel-input' }, [el('option', { value: '', text: '— pick an issue —' })]
-            .concat(opts.map((o) => el('option', { value: o.repo + '#' + o.number, text: '#' + o.number + ' ' + o.title }))));
+            .concat(opts.map((o) => el('option', { value: o.repo + '#' + o.number, text: '#' + o.number + ' ' + o.title + (o.sprint ? ' · ' + o.sprint : '') }))));
           const addBtn = el('button', { class: 'btn', text: t.add, onclick: () => {
             const ref = parseIssueRef(sel.value, getRepo());
             if (!ref) { showError('Pick an issue first'); return; }
