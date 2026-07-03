@@ -85,8 +85,9 @@ html, body {
 .pill-title { font-weight: 600; font-size: 13px; }
 .pill-range { color: var(--muted); font-size: 11px; }
 .pill-prog { display: flex; align-items: center; gap: 6px; }
-.pill-bar { flex: 1; height: 5px; background: var(--border); border-radius: 999px; overflow: hidden; min-width: 50px; }
+.pill-bar { flex: 1; display: flex; height: 5px; background: var(--border); border-radius: 999px; overflow: hidden; min-width: 50px; }
 .pill-bar-fill { display: block; height: 100%; background: var(--accent-2); }
+.pill-bar-cancelled { display: block; height: 100%; background: #e5534b; }
 .pill-prog-txt { color: var(--muted); font-size: 10px; white-space: nowrap; }
 .btn-new-sprint {
   align-self: center; background: transparent; border: 1px dashed var(--border);

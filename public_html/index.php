@@ -7,6 +7,14 @@ declare(strict_types=1);
 require __DIR__ . '/api/gh.php';
 
 $loggedIn = (bool) current_token();
+
+// Cache-bust static assets by their mtime so browsers pick up new builds
+// immediately instead of serving a stale app.js/app.css.
+$asset = function (string $path): string {
+    $full = __DIR__ . $path;
+    $v = is_file($full) ? filemtime($full) : null;
+    return $path . ($v ? '?v=' . $v : '');
+};
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -14,7 +22,7 @@ $loggedIn = (bool) current_token();
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Issue Kanban</title>
-  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="<?= htmlspecialchars($asset('/assets/app.css'), ENT_QUOTES) ?>">
 </head>
 <body>
 <?php if (!$loggedIn): ?>
@@ -63,7 +71,7 @@ $loggedIn = (bool) current_token();
     <div class="modal-body" id="modal-body"></div>
   </div>
 
-  <script src="/assets/app.js"></script>
+  <script src="<?= htmlspecialchars($asset('/assets/app.js'), ENT_QUOTES) ?>"></script>
 <?php endif; ?>
 </body>
 </html>

@@ -144,6 +144,8 @@
   function issueColor(name) { if (!name) return null; const h = ISSUE_COLORS[String(name).toUpperCase()]; return h ? '#' + h : null; }
   function itemSprint(it) { return it.sprint || null; } // sprint name (from label) or null
   function isDone(it) { return (itemStatusName(it) || '').toLowerCase() === (cfg().statusDone || '').toLowerCase(); }
+  // Cancelled / pushed work: counted separately (shown red) so it doesn't read as "done".
+  function isCancelled(it) { const s = (itemStatusName(it) || '').toLowerCase(); return s.includes('cancel') || s.includes('push'); }
   // stable "owner/repo#number" key for matching parent/child relationships
   function itemKey(it) { return (it.repo || '') + '#' + (it.number != null ? it.number : ''); }
   function parentKey(it) { return it.parent && it.parent.number != null ? (it.parent.repo || it.repo) + '#' + it.parent.number : null; }
@@ -217,14 +219,15 @@
     return s ? s.name : null;
   }
   function sprintProgress(name) {
-    let done = 0, total = 0, doneC = 0, totalC = 0;
+    let done = 0, total = 0, doneC = 0, totalC = 0, cancelled = 0, cancelledC = 0;
     state.board.items.forEach((it) => {
       if (itemSprint(it) !== name) return;
       const pts = itemPoints(it) || 0;
       total += pts; totalC++;
-      if (isDone(it)) { done += pts; doneC++; }
+      if (isCancelled(it)) { cancelled += pts; cancelledC++; }
+      else if (isDone(it)) { done += pts; doneC++; }
     });
-    return { done, total, doneC, totalC };
+    return { done, total, doneC, totalC, cancelled, cancelledC };
   }
 
   function renderSprintBar() {
@@ -263,9 +266,13 @@
     children.push(el('span', { class: 'pill-title', text: label }));
     if (range) children.push(el('span', { class: 'pill-range', text: range }));
     if (prog && prog.totalC > 0) {
-      const pct = prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 0;
+      const donePct = prog.total > 0 ? (prog.done / prog.total) * 100 : 0;
+      const cancPct = prog.total > 0 ? (prog.cancelled / prog.total) * 100 : 0;
+      const segs = [el('span', { class: 'pill-bar-fill', style: `width:${donePct}%` })];
+      if (cancPct > 0) segs.push(el('span', { class: 'pill-bar-cancelled', style: `width:${cancPct}%`,
+        title: `${prog.cancelled} pts cancelled/pushed` }));
       children.push(el('span', { class: 'pill-prog' }, [
-        el('span', { class: 'pill-bar' }, [el('span', { class: 'pill-bar-fill', style: `width:${pct}%` })]),
+        el('span', { class: 'pill-bar' }, segs),
         el('span', { class: 'pill-prog-txt', text: `${prog.done}/${prog.total} pts` }),
       ]));
     }
@@ -818,7 +825,6 @@
   function buildEditableFields(it, savers) {
     const entries = [];
     it.issueFields = it.issueFields || {};
-    const dateSkip = new Set([cfg().startField, cfg().dueField].filter(Boolean)); // dedicated Start/Due rows handle these
 
     if (it.issueId) {
       Object.entries(state.board.issueFields || {}).forEach(([name, def]) => {
@@ -851,14 +857,10 @@
             () => (inp.value || '') !== (cur().value || ''),
             async () => { const v = inp.value || null; await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: def.id, kind: 'text', value: v }); it.issueFields[name] = { type: 'text', value: v, fieldId: def.id }; }
           ));
-        } else if (def.type === 'date' && !dateSkip.has(name)) {
-          const inp = el('input', { class: 'inp', type: 'date', value: cur().value || '' });
-          entries.push({ label: name, control: inp });
-          savers.push(mkSaver(
-            () => (inp.value || '') !== (cur().value || ''),
-            async () => { const v = inp.value || null; await post('/api/issue-field-set.php', { issueId: it.issueId, fieldId: def.id, kind: 'date', value: v }); it.issueFields[name] = { type: 'date', value: v, fieldId: def.id }; recomputeDates(it); }
-          ));
         }
+        // Date issue fields (Start date, Target date, …) are intentionally NOT
+        // rendered here — the dedicated Start/Due rows above are the only date
+        // editors, so the board shows exactly one start and one due date.
       });
     }
 
@@ -898,14 +900,9 @@
           () => (inp.value || '') !== (cur().text || ''),
           async () => { const v = inp.value || null; await setField(it, name, 'text', v); it.fields[name] = v ? { type: 'text', text: v } : undefined; }
         ));
-      } else if (dt === 'DATE') {
-        const inp = el('input', { class: 'inp', type: 'date', value: cur().date || '' });
-        entries.push({ label: name, control: inp });
-        savers.push(mkSaver(
-          () => (inp.value || '') !== (cur().date || ''),
-          async () => { const v = inp.value || null; await setField(it, name, 'date', v); it.fields[name] = v ? { type: 'date', date: v } : undefined; recomputeDates(it); }
-        ));
       }
+      // DATE project fields are intentionally NOT rendered here — the dedicated
+      // Start/Due rows are the only date editors (one start + one due date).
       // ITERATION / TITLE / ASSIGNEES / LABELS / MILESTONE / etc. aren't edited here
     });
 
@@ -1179,7 +1176,7 @@
     ));
     gridEntries.push({ label: 'Status', control: statusSel });
 
-    // Story Points (or a create-field prompt if the board has no points field)
+    // Points (or a create-field prompt if the board has no points field)
     if (cfg().pointsField) {
       const pointsInput = el('input', { class: 'inp', type: 'number', step: '0.5', value: itemPoints(it) ?? '' });
       savers.push(mkSaver(
@@ -1190,14 +1187,14 @@
           it.fields[cfg().pointsField] = nv == null ? undefined : { type: 'number', number: nv };
         }
       ));
-      gridEntries.push({ label: 'Story Points', control: pointsInput });
+      gridEntries.push({ label: cfg().pointsName, control: pointsInput });
     } else {
       const createBtn = el('button', { class: 'btn', text: `Create "${cfg().pointsName}" field`, onclick: async () => {
         createBtn.disabled = true; createBtn.textContent = 'Creating…';
         try { await post('/api/create-field.php', { name: cfg().pointsName, dataType: 'NUMBER' }); closeModal(); await refresh(); }
         catch (e) { createBtn.disabled = false; createBtn.textContent = `Create "${cfg().pointsName}" field`; showError(e.message); }
       } });
-      gridEntries.push({ label: 'Story Points', control: el('div', { class: 'grid-create' }, [el('span', { class: 'bar-hint', text: 'No points field.' }), createBtn]) });
+      gridEntries.push({ label: cfg().pointsName, control: el('div', { class: 'grid-create' }, [el('span', { class: 'bar-hint', text: 'No points field.' }), createBtn]) });
     }
 
     // Start date (issue-backed or Projects v2 date field)
@@ -1329,7 +1326,7 @@
         control = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })].concat(opts.map((o) => el('option', { value: o.id, text: o.name }))));
       } else if (def.type === 'number') { control = el('input', { class: 'inp', type: 'number', step: 'any' }); }
       else if (def.type === 'text')     { control = el('input', { class: 'inp', type: 'text' }); }
-      else if (def.type === 'date')     { control = el('input', { class: 'inp', type: 'date' }); }
+      // date issue fields are owned by the dedicated Start/Due rows — skip here
       else return;
       entries.push({ label: name, control });
       setters.push({ src: 'issue', kind: def.type, fieldId: def.id, get: () => control.value || null });
@@ -1345,7 +1342,7 @@
         kind = 'singleSelect';
       } else if (dt === 'NUMBER') { control = el('input', { class: 'inp', type: 'number', step: 'any' }); kind = 'number'; }
       else if (dt === 'TEXT')     { control = el('input', { class: 'inp', type: 'text' }); kind = 'text'; }
-      else if (dt === 'DATE')     { control = el('input', { class: 'inp', type: 'date' }); kind = 'date'; }
+      // DATE fields are owned by the dedicated Start/Due rows — skip here
       else return;
       entries.push({ label: name, control });
       setters.push({ src: 'pv2', kind, fieldId: meta.id, get: () => control.value || null });
@@ -1543,7 +1540,7 @@
 
     const createGrid = el('div', { class: 'field-grid' }, [
       gridField('Status', statusSel),
-      pointsInput ? gridField('Story Points', pointsInput) : null,
+      pointsInput ? gridField(cfg().pointsName, pointsInput) : null,
       startInput ? gridField('Start date', startInput) : null,
       dueInput ? gridField('Due date', dueInput) : null,
       gridField('Sprint', sprintSel),
