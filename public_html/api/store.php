@@ -85,6 +85,66 @@ function sprints_mutate(string $projectId, callable $fn): array
     return $new;
 }
 
+/**
+ * Read the roster for a project (read-only, no lock).
+ * Shape: { people: { "<login>": <weeklyHours> }, manual: { "<team>": [ {name, hours} ] } }
+ * `people` are GitHub logins; `manual` are extra non-GitHub members per team.
+ */
+function roster_get(string $projectId): array
+{
+    $f = sprint_store_file();
+    $default = ['people' => (object) [], 'manual' => (object) [], 'hoursPerPoint' => 0];
+    if (!is_file($f)) {
+        return $default;
+    }
+    $all = json_decode((string) file_get_contents($f), true);
+    if (!is_array($all)) {
+        return $default;
+    }
+    $r = $all[$projectId]['roster'] ?? [];
+    return [
+        'people'        => $r['people'] ?? (object) [],
+        'manual'        => $r['manual'] ?? (object) [],
+        'hoursPerPoint' => isset($r['hoursPerPoint']) ? (float) $r['hoursPerPoint'] : 0,
+    ];
+}
+
+/**
+ * Read-modify-write the roster for a project under an exclusive lock.
+ * $fn receives the current roster (assoc array with 'people' and 'manual') and
+ * must return the new one. Preserves sibling keys (sprints, snapshots).
+ */
+function roster_mutate(string $projectId, callable $fn): array
+{
+    $f = sprint_store_file();
+    $fp = fopen($f, 'c+');
+    if (!$fp) {
+        json_error('Unable to open roster storage for writing', 500);
+    }
+    flock($fp, LOCK_EX);
+
+    $raw = stream_get_contents($fp);
+    $all = json_decode((string) $raw, true);
+    if (!is_array($all)) {
+        $all = [];
+    }
+    $current = $all[$projectId]['roster'] ?? ['people' => [], 'manual' => []];
+    if (!isset($current['people']) || !is_array($current['people'])) $current['people'] = [];
+    if (!isset($current['manual']) || !is_array($current['manual'])) $current['manual'] = [];
+
+    $new = $fn($current);
+
+    $all[$projectId]['roster'] = $new;
+    rewind($fp);
+    ftruncate($fp, 0);
+    fwrite($fp, json_encode($all, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fp);
+    flock($fp, LOCK_UN);
+    fclose($fp);
+
+    return $new;
+}
+
 /** Read the website-only snapshots for a project (read-only, no lock). */
 function snapshots_get(string $projectId): array
 {

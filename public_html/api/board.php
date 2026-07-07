@@ -372,6 +372,7 @@ function fetch_board(): array
         'items'       => $items,
         'sprints'     => sprints_get($projectId),
         'snapshots'   => snapshots_get($projectId),
+        'roster'      => roster_get($projectId),
     ];
 }
 

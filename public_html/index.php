@@ -41,6 +41,7 @@ $asset = function (string $path): string {
         <button class="tab active" data-view="board">Board</button>
         <button class="tab" data-view="timeline">Timeline</button>
         <button class="tab" data-view="stats">Stats</button>
+        <button class="tab" data-view="roster">Roster</button>
       </nav>
       <button id="new-issue-btn" class="btn btn-primary">+ New issue</button>
       <button id="help-wanted-btn" class="btn btn-help" aria-pressed="false" title="Show only issues labelled help wanted">🆘 Help wanted</button>
@@ -64,6 +65,7 @@ $asset = function (string $path): string {
     <div id="board-view" class="board"></div>
     <div id="timeline-view" class="timeline hidden"></div>
     <div id="stats-view" class="stats hidden"></div>
+    <div id="roster-view" class="roster hidden"></div>
     <div id="loading" class="loading">Loading board…</div>
     <div id="error" class="error hidden"></div>
   </main>

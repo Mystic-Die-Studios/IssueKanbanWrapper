@@ -89,6 +89,7 @@ html, body {
 .pill-bar-fill { display: block; height: 100%; background: var(--accent-2); }
 .pill-bar-cancelled { display: block; height: 100%; background: #e5534b; }
 .pill-prog-txt { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.pill-target { color: #f0b429; font-size: 10px; white-space: nowrap; margin-top: 1px; }
 .btn-new-sprint {
   align-self: center; background: transparent; border: 1px dashed var(--border);
   color: var(--accent); border-radius: 10px; padding: 8px 14px; cursor: pointer; text-decoration: none;
@@ -222,6 +223,31 @@ html, body {
 .warn-row:hover { background: var(--panel-2); }
 .warn-row-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .warn-row-tags { color: #f0b429; font-size: 12px; white-space: nowrap; }
+
+/* ---- roster ---- */
+.roster { padding: 20px 24px; overflow-y: auto; }
+.roster-head { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; margin-bottom: 4px; }
+.roster-cap { display: flex; align-items: baseline; gap: 8px; }
+.roster-cap-val { font-size: 20px; font-weight: 700; color: #f0b429; }
+.roster-note { display: block; margin-bottom: 16px; }
+.roster-hpp { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.roster-hpp .field-label { margin: 0; white-space: nowrap; }
+.roster-hpp .roster-hrs { width: 74px; }
+.roster-team { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
+.roster-team-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--panel-2); }
+.roster-team-name { font-weight: 600; }
+.roster-team-vel { color: #f0b429; font-size: 13px; font-weight: 600; }
+.roster-rows { display: flex; flex-direction: column; }
+.roster-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+.roster-row:last-child { border-bottom: 0; }
+.roster-person { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+.roster-nongit { color: var(--muted); }
+.roster-hrs-field { display: flex; align-items: center; gap: 6px; }
+.roster-hrs { width: 74px; text-align: right; }
+.roster-name { min-width: 160px; }
+.roster-hrs-unit { color: var(--muted); font-size: 11px; }
+.roster-row.roster-add { background: rgba(255,255,255,.02); }
+.roster-manual .roster-nongit { font-size: 14px; }
 
 /* ---- timeline ---- */
 .timeline { padding: 16px; max-width: 900px; }

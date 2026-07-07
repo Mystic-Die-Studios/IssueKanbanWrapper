@@ -77,4 +77,15 @@ return [
     // The label surfaced as a prominent one-click "Help wanted" filter toggle in
     // the top bar (matched case-insensitively; also matches "help-wanted").
     'HELP_WANTED_LABEL'   => 'help wanted',
+
+    // --- Integration bridge (server-to-server; see api/bridge.php) ---
+    // A peer app (the Employee Dashboard) calls /api/bridge.php authorized by
+    // this shared secret. Generate a long random value and set the SAME value as
+    // KANBAN_BRIDGE_SECRET in the Dashboard's .env. Leave '' to disable the bridge.
+    'BRIDGE_SECRET'        => '',
+
+    // GitHub token (a fine-grained PAT / service account) the bridge uses to read
+    // the board on behalf of dashboard requests — no user session involved. Needs
+    // read access to the Projects v2 board. Leave '' to expose only the ping.
+    'SERVICE_GITHUB_TOKEN' => '',
 ];

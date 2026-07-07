@@ -174,6 +174,63 @@
   function isTeamLabel(name) { const p = teamPrefix(); return !!p && name.indexOf(p) === 0; }
   function teamDisplay(name) { const p = teamPrefix(); return isTeamLabel(name) ? name.slice(p.length) : name; }
 
+  // ---- roster / capacity ----
+  function roster() { const r = state.board && state.board.roster; return { people: (r && r.people) || {}, manual: (r && r.manual) || {} }; }
+  function personWeeklyHours(login) { const h = roster().people[login]; return h ? Number(h) : 0; }
+  function teamManualEntries(team) { const m = roster().manual[team]; return Array.isArray(m) ? m : []; }
+  // Every team label present on the board (from issue labels), plus any team that
+  // only has manual (non-git) members. Sorted by display name.
+  function teamNames() {
+    const set = new Set();
+    (state.board.items || []).forEach((it) => it.labels.forEach((l) => { if (isTeamLabel(l.name)) set.add(l.name); }));
+    Object.keys(roster().manual || {}).forEach((t) => { if (t) set.add(t); });
+    return Array.from(set).sort((a, b) => teamDisplay(a).localeCompare(teamDisplay(b)));
+  }
+  // team label -> [{login,name,avatarUrl}] derived from assignees on that team's issues.
+  function teamMembers(team) {
+    const by = new Map();
+    (state.board.items || []).forEach((it) => {
+      if (!it.labels.some((l) => l.name === team)) return;
+      (it.assignees || []).forEach((a) => { if (a.login && !by.has(a.login)) by.set(a.login, a); });
+    });
+    return Array.from(by.values()).sort((a, b) => personName(a).localeCompare(personName(b)));
+  }
+  // Weekly hours for a set of teams (null => all teams), git members counted once
+  // across the set, plus each team's manual (non-git) hours.
+  function weeklyCapacity(teams) {
+    const list = teams && teams.length ? teams : teamNames();
+    const logins = new Set();
+    let hours = 0;
+    list.forEach((t) => {
+      teamMembers(t).forEach((m) => logins.add(m.login));
+      teamManualEntries(t).forEach((e) => { hours += Number(e.hours) || 0; });
+    });
+    logins.forEach((login) => { hours += personWeeklyHours(login); });
+    return hours;
+  }
+  // Number of weeks a sprint spans (from its dates); defaults to 1 when undated.
+  function sprintWeeks(sprint) {
+    if (!sprint || !sprint.startDate || !sprint.endDate) return 1;
+    const ms = new Date(sprint.endDate + 'T00:00:00') - new Date(sprint.startDate + 'T00:00:00');
+    const days = ms / 86400000 + 1; // inclusive
+    return Math.max(1, Math.round(days / 7));
+  }
+  // Teams currently selected in the filter bar (empty => no team filter active).
+  function activeTeams() { return Array.from(state.activeLabels).filter(isTeamLabel); }
+  // Hours-per-point ratio (converts capacity hours -> velocity in points). 0 = unset.
+  function hoursPerPoint() { const r = roster().hoursPerPoint; return r ? Number(r) : 0; }
+  function hoursToPoints(hours) { const hpp = hoursPerPoint(); return hpp > 0 ? hours / hpp : null; }
+  // Capacity hours for a sprint under the active team filter.
+  function sprintTargetHours(sprint) {
+    const teams = activeTeams();
+    return weeklyCapacity(teams.length ? teams : null) * sprintWeeks(sprint);
+  }
+  // Target velocity in POINTS for a sprint (null when no hours-per-point set).
+  function sprintTargetPoints(sprint) {
+    const p = hoursToPoints(sprintTargetHours(sprint));
+    return p == null ? null : Math.round(p);
+  }
+
   // sprint-label helpers (hidden from the normal Labels filter; shown via sprint bar)
   function sprintPrefix() { return cfg().sprintPrefix || 'sprint:'; }
   function isSprintLabel(name) { const p = sprintPrefix(); return !!p && name.indexOf(p) === 0; }
@@ -241,10 +298,18 @@
     const s = allSprints().find((x) => isCurrentSprint(x));
     return s ? s.name : null;
   }
+  // True unless label/team filters are active and this item matches none of them.
+  function passesLabelFilter(it) {
+    if (state.activeLabels.size === 0) return true;
+    const names = new Set(it.labels.map((l) => l.name));
+    for (const t of state.activeLabels) { if (names.has(t)) return true; }
+    return false;
+  }
   function sprintProgress(name) {
     let done = 0, total = 0, doneC = 0, totalC = 0, cancelled = 0, cancelledC = 0;
     state.board.items.forEach((it) => {
       if (itemSprint(it) !== name) return;
+      if (!passesLabelFilter(it)) return; // header numbers track the active team/label filter
       const pts = itemPoints(it) || 0;
       total += pts; totalC++;
       if (isCancelled(it)) { cancelled += pts; cancelledC++; }
@@ -261,15 +326,23 @@
     const sprints = allSprints().slice()
       .sort((a, b) => (b.startDate || '').localeCompare(a.startDate || '')); // newest first
 
+    // Target-velocity context: which team scope the header numbers reflect.
+    const teams = activeTeams();
+    const scopeNote = teams.length ? teams.map(teamDisplay).join(', ') : 'all teams';
+
     // individual sprints first, then "All sprints" last
     sprints.forEach((s) => {
       bar.appendChild(sprintPill(
         s.name, state.sprint === s.name,
         s.name + (s.closed ? ' ✓' : ''),
-        fmtRange(s), sprintProgress(s.name), isCurrentSprint(s)
+        fmtRange(s), sprintProgress(s.name), isCurrentSprint(s),
+        { hours: sprintTargetHours(s), points: sprintTargetPoints(s), scope: scopeNote }
       ));
     });
-    bar.appendChild(sprintPill('all', state.sprint === 'all', 'All sprints', '', null, false));
+    // "All sprints" pill shows weekly capacity rather than a per-sprint target.
+    const weeklyHours = weeklyCapacity(teams.length ? teams : null);
+    bar.appendChild(sprintPill('all', state.sprint === 'all', 'All sprints', '', null, false,
+      { hours: weeklyHours, points: hoursToPoints(weeklyHours) == null ? null : Math.round(hoursToPoints(weeklyHours)), scope: scopeNote, weekly: true }));
 
     bar.appendChild(el('button', {
       class: 'btn btn-new-sprint', text: '+ New / manage sprints',
@@ -283,7 +356,7 @@
     }
   }
 
-  function sprintPill(value, active, label, range, prog, current) {
+  function sprintPill(value, active, label, range, prog, current, target) {
     const children = [];
     if (current) children.push(el('span', { class: 'pill-now', text: 'NOW' }));
     children.push(el('span', { class: 'pill-title', text: label }));
@@ -298,6 +371,18 @@
         el('span', { class: 'pill-bar' }, segs),
         el('span', { class: 'pill-prog-txt', text: `${prog.done}/${prog.total} pts` }),
       ]));
+    }
+    if (target && target.hours > 0) {
+      // Velocity is in points; show that when an hours-per-point ratio is set,
+      // otherwise fall back to raw capacity hours with a nudge to set the ratio.
+      const per = target.weekly ? '/wk' : '';
+      const txt = (target.points != null)
+        ? `🎯 ${target.points} pts${per} · ${target.scope}`
+        : `🎯 ${Math.round(target.hours)}h${per} · ${target.scope}`;
+      const ttl = (target.points != null)
+        ? `Target velocity — ${target.points} pts (${Math.round(target.hours)}h capacity from ${target.scope})`
+        : `Capacity ${Math.round(target.hours)}h from ${target.scope} — set “hours per point” in the Roster tab to show this as velocity (points)`;
+      children.push(el('span', { class: 'pill-target', title: ttl, text: txt }));
     }
     return el('button', {
       class: 'sprint-pill' + (active ? ' active' : '') + (current ? ' current' : ''),
@@ -2073,6 +2158,129 @@
     return row;
   }
 
+  // ---- roster view ----
+  async function saveRoster(payload) {
+    const res = await post('/api/roster.php', payload);
+    if (res && res.roster) state.board.roster = res.roster;
+    renderSprintBar(); // capacity changed -> target velocities change
+  }
+  // weekly hours for one team (git members counted once + manual hours)
+  function teamWeeklyHours(team) {
+    let h = 0;
+    teamMembers(team).forEach((m) => { h += personWeeklyHours(m.login); });
+    teamManualEntries(team).forEach((e) => { h += Number(e.hours) || 0; });
+    return h;
+  }
+
+  function renderRoster() {
+    const root = $('#roster-view');
+    root.innerHTML = '';
+
+    const teams = teamNames();
+    const selSprint = state.sprint !== 'all' ? allSprints().find((s) => s.name === state.sprint) : null;
+    const weeks = selSprint ? sprintWeeks(selSprint) : null;
+
+    // Velocity = points. Convert capacity hours -> points via hours-per-point.
+    const hpp = hoursPerPoint();
+    const totalWeeklyHours = weeklyCapacity(null);
+    const asPts = (hours) => hpp > 0 ? Math.round(hours / hpp) : null;
+    const velText = (hours) => {
+      const p = asPts(hours);
+      return p != null ? `${p} pts` : `${Math.round(hours)}h`;
+    };
+
+    // hours-per-point control
+    const hppInput = el('input', { class: 'inp roster-hrs', type: 'number', min: '0', step: '0.5', value: hpp || '', placeholder: '—' });
+    hppInput.addEventListener('change', async () => {
+      try { await saveRoster({ op: 'setHoursPerPoint', value: hppInput.value === '' ? 0 : parseFloat(hppInput.value) }); renderRoster(); }
+      catch (e) { showError(e.message); }
+    });
+
+    const totalWeeklyPts = asPts(totalWeeklyHours);
+    root.appendChild(el('div', { class: 'roster-head' }, [
+      el('h2', { class: 'stats-scope', text: 'Roster' }),
+      el('div', { class: 'roster-cap' }, [
+        el('span', { class: 'roster-cap-val', text: totalWeeklyPts != null ? `${totalWeeklyPts} pts / wk` : `${Math.round(totalWeeklyHours)}h / wk` }),
+        el('span', { class: 'bar-hint', text: 'total target velocity' + (selSprint ? ` (${state.sprint}: ${velText(totalWeeklyHours * weeks)})` : ' per week') }),
+      ]),
+      el('label', { class: 'roster-hpp' }, [
+        el('span', { class: 'field-label', text: 'Hours per point' }),
+        hppInput,
+      ]),
+    ]));
+    root.appendChild(el('div', { class: 'bar-hint roster-note', text:
+      (hpp > 0 ? '' : 'Set “hours per point” to convert capacity into velocity (points). ')
+      + 'Weekly hours are per person and shared across every team they’re on. Use “+ add person” for teammates who aren’t on GitHub.' }));
+
+    if (!teams.length) {
+      root.appendChild(el('div', { class: 'loading', text: 'No teams found. Add a "' + teamPrefix() + '<name>" label to issues to define teams.' }));
+      return;
+    }
+
+    teams.forEach((team) => {
+      const members = teamMembers(team);
+      const manual = teamManualEntries(team);
+      const weekly = teamWeeklyHours(team);
+
+      const card = el('div', { class: 'roster-team' });
+      card.appendChild(el('div', { class: 'roster-team-head' }, [
+        el('span', { class: 'roster-team-name', text: '👥 ' + teamDisplay(team) }),
+        el('span', { class: 'roster-team-vel', title: `Team velocity — ${weekly}h/wk capacity`,
+          text: velText(weekly) + '/wk' + (selSprint ? ` · ${velText(weekly * weeks)} in ${state.sprint}` : '') }),
+      ]));
+
+      const rows = el('div', { class: 'roster-rows' });
+
+      // GitHub members
+      members.forEach((m) => {
+        const hrs = el('input', { class: 'inp roster-hrs', type: 'number', min: '0', step: '0.5', value: personWeeklyHours(m.login) || '' });
+        hrs.addEventListener('change', async () => {
+          try { await saveRoster({ op: 'setPersonHours', login: m.login, hours: hrs.value === '' ? 0 : parseFloat(hrs.value) }); renderRoster(); }
+          catch (e) { showError(e.message); }
+        });
+        rows.appendChild(el('div', { class: 'roster-row' }, [
+          el('div', { class: 'roster-person' }, [avatarEl(personName(m), m.avatarUrl, { size: 22 }), el('span', { text: ' ' + personName(m) })]),
+          el('label', { class: 'roster-hrs-field' }, [hrs, el('span', { class: 'roster-hrs-unit', text: 'h/wk' })]),
+        ]));
+      });
+      if (!members.length && !manual.length) rows.appendChild(el('div', { class: 'bar-hint', text: 'No one assigned to this team’s issues yet.' }));
+
+      // Manual (non-git) members — editable list with add/remove.
+      const commitManual = async (entries) => {
+        try { await saveRoster({ op: 'setTeamExtra', team, entries }); renderRoster(); }
+        catch (e) { showError(e.message); }
+      };
+      manual.forEach((e, i) => {
+        const nameInp = el('input', { class: 'inp roster-name', type: 'text', value: e.name });
+        const hrs = el('input', { class: 'inp roster-hrs', type: 'number', min: '0', step: '0.5', value: e.hours || '' });
+        const save = () => { const next = manual.slice(); next[i] = { name: nameInp.value.trim(), hours: hrs.value === '' ? 0 : parseFloat(hrs.value) }; commitManual(next); };
+        nameInp.addEventListener('change', save);
+        hrs.addEventListener('change', save);
+        const del = el('button', { class: 'ghost-del', text: '✕', title: 'Remove', onclick: () => { const next = manual.slice(); next.splice(i, 1); commitManual(next); } });
+        rows.appendChild(el('div', { class: 'roster-row roster-manual' }, [
+          el('div', { class: 'roster-person' }, [el('span', { class: 'roster-nongit', text: '○' }), nameInp]),
+          el('label', { class: 'roster-hrs-field' }, [hrs, el('span', { class: 'roster-hrs-unit', text: 'h/wk' }), del]),
+        ]));
+      });
+
+      // Add-person row
+      const addName = el('input', { class: 'inp roster-name', type: 'text', placeholder: 'name (not on GitHub)' });
+      const addHrs = el('input', { class: 'inp roster-hrs', type: 'number', min: '0', step: '0.5', placeholder: 'h' });
+      const addBtn = el('button', { class: 'btn', text: '+ add person', onclick: () => {
+        const name = addName.value.trim();
+        if (!name) { showError('Enter a name'); return; }
+        commitManual(manual.concat([{ name, hours: addHrs.value === '' ? 0 : parseFloat(addHrs.value) }]));
+      } });
+      rows.appendChild(el('div', { class: 'roster-row roster-add' }, [
+        el('div', { class: 'roster-person' }, [addName]),
+        el('div', { class: 'roster-hrs-field' }, [addHrs, addBtn]),
+      ]));
+
+      card.appendChild(rows);
+      root.appendChild(card);
+    });
+  }
+
   // ---- view switching ----
   function setView(v) {
     state.view = v;
@@ -2080,16 +2288,20 @@
     $('#board-view').classList.toggle('hidden', v !== 'board');
     $('#timeline-view').classList.toggle('hidden', v !== 'timeline');
     $('#stats-view').classList.toggle('hidden', v !== 'stats');
+    $('#roster-view').classList.toggle('hidden', v !== 'roster');
     if (v === 'stats') renderStats();
     if (v === 'timeline') renderTimeline();
+    if (v === 'roster') renderRoster();
   }
 
   // re-render whichever view is active (used after filter/sprint changes)
   function rerender() {
-    renderFilterBar(); // team/label counts track the current sprint & toggles
+    renderFilterBar();  // team/label counts track the current sprint & toggles
+    renderSprintBar();  // sprint points + target velocity track the team filter
     renderBoard();
     if (state.view === 'timeline') renderTimeline();
     else if (state.view === 'stats') renderStats();
+    else if (state.view === 'roster') renderRoster();
   }
 
   // ---- refresh from GitHub ----
