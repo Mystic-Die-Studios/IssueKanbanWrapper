@@ -7,6 +7,8 @@
  * POST { op:"setPersonHours",   login, hours }          -> set a person's weekly hours
  * POST { op:"setTeamExtra",     team, entries:[{name,hours}] } -> replace a team's manual list
  * POST { op:"setHoursPerPoint", value }                 -> hours-per-point (for velocity)
+ * POST { op:"addToTeam",      team, login }             -> force a GitHub user into a team
+ * POST { op:"removeFromTeam", team, login }             -> force a GitHub user out of a team
  *
  * Stored in data/sprints.json (git-ignored) alongside sprints/snapshots.
  */
@@ -57,6 +59,41 @@ if ($op === 'setTeamExtra') {
     $roster = roster_mutate($pid, function ($r) use ($team, $entries) {
         if (!$entries) unset($r['manual'][$team]);
         else $r['manual'][$team] = $entries;
+        return $r;
+    });
+    json_out(['ok' => true, 'roster' => $roster]);
+}
+
+if ($op === 'addToTeam' || $op === 'removeFromTeam') {
+    $team  = trim((string) ($in['team'] ?? ''));
+    $login = trim((string) ($in['login'] ?? ''));
+    if ($team === '' || $login === '') json_error("'team' and 'login' are required", 400);
+
+    // Keep a list membership tidy: return the array with $login removed.
+    $without = function ($arr, $login) {
+        $arr = is_array($arr) ? $arr : [];
+        return array_values(array_filter($arr, fn ($l) => $l !== $login));
+    };
+
+    $roster = roster_mutate($pid, function ($r) use ($op, $team, $login, $without) {
+        if (!isset($r['teamAdd']) || !is_array($r['teamAdd'])) $r['teamAdd'] = [];
+        if (!isset($r['teamRemove']) || !is_array($r['teamRemove'])) $r['teamRemove'] = [];
+
+        if ($op === 'addToTeam') {
+            $r['teamRemove'][$team] = $without($r['teamRemove'][$team] ?? [], $login);
+            $add = $without($r['teamAdd'][$team] ?? [], $login);
+            $add[] = $login;
+            $r['teamAdd'][$team] = array_values($add);
+        } else { // removeFromTeam
+            $r['teamAdd'][$team] = $without($r['teamAdd'][$team] ?? [], $login);
+            $rem = $without($r['teamRemove'][$team] ?? [], $login);
+            $rem[] = $login;
+            $r['teamRemove'][$team] = array_values($rem);
+        }
+        // Drop now-empty lists so the file stays tidy.
+        foreach (['teamAdd', 'teamRemove'] as $k) {
+            if (empty($r[$k][$team])) unset($r[$k][$team]);
+        }
         return $r;
     });
     json_out(['ok' => true, 'roster' => $roster]);

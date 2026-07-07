@@ -175,7 +175,13 @@
   function teamDisplay(name) { const p = teamPrefix(); return isTeamLabel(name) ? name.slice(p.length) : name; }
 
   // ---- roster / capacity ----
-  function roster() { const r = (state.board && state.board.roster) || {}; return { people: r.people || {}, manual: r.manual || {}, hoursPerPoint: r.hoursPerPoint || 0 }; }
+  function roster() { const r = (state.board && state.board.roster) || {}; return { people: r.people || {}, manual: r.manual || {}, hoursPerPoint: r.hoursPerPoint || 0, teamAdd: r.teamAdd || {}, teamRemove: r.teamRemove || {} }; }
+  // Every GitHub user seen on the board (login -> {login,name,avatarUrl}).
+  function allBoardUsers() {
+    const by = new Map();
+    (state.board.items || []).forEach((it) => (it.assignees || []).forEach((a) => { if (a.login && !by.has(a.login)) by.set(a.login, a); }));
+    return by;
+  }
   function personWeeklyHours(login) { const h = roster().people[login]; return h ? Number(h) : 0; }
   function teamManualEntries(team) { const m = roster().manual[team]; return Array.isArray(m) ? m : []; }
   // Every team label present on the board (from issue labels), plus any team that
@@ -184,15 +190,20 @@
     const set = new Set();
     (state.board.items || []).forEach((it) => it.labels.forEach((l) => { if (isTeamLabel(l.name)) set.add(l.name); }));
     Object.keys(roster().manual || {}).forEach((t) => { if (t) set.add(t); });
+    Object.keys(roster().teamAdd || {}).forEach((t) => { if (t) set.add(t); });
     return Array.from(set).sort((a, b) => teamDisplay(a).localeCompare(teamDisplay(b)));
   }
-  // team label -> [{login,name,avatarUrl}] derived from assignees on that team's issues.
+  // team label -> [{login,name,avatarUrl}]: assignees on that team's issues, plus
+  // manual additions (teamAdd), minus manual removals (teamRemove).
   function teamMembers(team) {
     const by = new Map();
     (state.board.items || []).forEach((it) => {
       if (!it.labels.some((l) => l.name === team)) return;
       (it.assignees || []).forEach((a) => { if (a.login && !by.has(a.login)) by.set(a.login, a); });
     });
+    const dir = allBoardUsers();
+    (roster().teamAdd[team] || []).forEach((login) => { if (!by.has(login)) by.set(login, dir.get(login) || { login, name: login, avatarUrl: null }); });
+    (roster().teamRemove[team] || []).forEach((login) => by.delete(login));
     return Array.from(by.values()).sort((a, b) => personName(a).localeCompare(personName(b)));
   }
   // Weekly hours for a set of teams (null => all teams), git members counted once
@@ -2231,19 +2242,41 @@
 
       const rows = el('div', { class: 'roster-rows' });
 
-      // GitHub members
+      const commitMembership = async (op, login) => {
+        try { await saveRoster({ op, team, login }); renderRoster(); }
+        catch (e) { showError(e.message); }
+      };
+
+      // GitHub members (assignee-derived + manual additions), each removable.
       members.forEach((m) => {
         const hrs = el('input', { class: 'inp roster-hrs', type: 'number', min: '0', step: '0.5', value: personWeeklyHours(m.login) || '' });
         hrs.addEventListener('change', async () => {
           try { await saveRoster({ op: 'setPersonHours', login: m.login, hours: hrs.value === '' ? 0 : parseFloat(hrs.value) }); renderRoster(); }
           catch (e) { showError(e.message); }
         });
+        const del = el('button', { class: 'ghost-del', text: '✕', title: `Remove ${personName(m)} from ${teamDisplay(team)}`,
+          onclick: () => commitMembership('removeFromTeam', m.login) });
         rows.appendChild(el('div', { class: 'roster-row' }, [
           el('div', { class: 'roster-person' }, [avatarEl(personName(m), m.avatarUrl, { size: 22 }), el('span', { text: ' ' + personName(m) })]),
-          el('label', { class: 'roster-hrs-field' }, [hrs, el('span', { class: 'roster-hrs-unit', text: 'h/wk' })]),
+          el('label', { class: 'roster-hrs-field' }, [hrs, el('span', { class: 'roster-hrs-unit', text: 'h/wk' }), del]),
         ]));
       });
-      if (!members.length && !manual.length) rows.appendChild(el('div', { class: 'bar-hint', text: 'No one assigned to this team’s issues yet.' }));
+      if (!members.length && !manual.length) rows.appendChild(el('div', { class: 'bar-hint', text: 'No one on this team yet — add a GitHub teammate below or “+ add person”.' }));
+
+      // Add an existing GitHub user to this team (users not already on it).
+      const inTeam = new Set(members.map((m) => m.login));
+      const candidates = Array.from(allBoardUsers().values())
+        .filter((u) => !inTeam.has(u.login))
+        .sort((a, b) => personName(a).localeCompare(personName(b)));
+      if (candidates.length) {
+        const pick = el('select', { class: 'inp roster-name' }, [el('option', { value: '', text: '— add GitHub teammate —' })]
+          .concat(candidates.map((u) => el('option', { value: u.login, text: personName(u) }))));
+        pick.addEventListener('change', () => { if (pick.value) commitMembership('addToTeam', pick.value); });
+        rows.appendChild(el('div', { class: 'roster-row roster-add' }, [
+          el('div', { class: 'roster-person' }, [pick]),
+          el('div', { class: 'roster-hrs-field' }, [el('span', { class: 'bar-hint', text: 'from GitHub' })]),
+        ]));
+      }
 
       // Manual (non-git) members — editable list with add/remove.
       const commitManual = async (entries) => {

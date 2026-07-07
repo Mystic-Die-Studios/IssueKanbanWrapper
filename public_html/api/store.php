@@ -106,6 +106,10 @@ function roster_get(string $projectId): array
         'people'        => $r['people'] ?? (object) [],
         'manual'        => $r['manual'] ?? (object) [],
         'hoursPerPoint' => isset($r['hoursPerPoint']) ? (float) $r['hoursPerPoint'] : 0,
+        // Manual team-membership overrides on top of the derived (assignee-based)
+        // membership: teamAdd forces someone in, teamRemove forces someone out.
+        'teamAdd'       => $r['teamAdd'] ?? (object) [],
+        'teamRemove'    => $r['teamRemove'] ?? (object) [],
     ];
 }
 
