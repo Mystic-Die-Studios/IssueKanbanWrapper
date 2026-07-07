@@ -175,7 +175,7 @@
   function teamDisplay(name) { const p = teamPrefix(); return isTeamLabel(name) ? name.slice(p.length) : name; }
 
   // ---- roster / capacity ----
-  function roster() { const r = state.board && state.board.roster; return { people: (r && r.people) || {}, manual: (r && r.manual) || {} }; }
+  function roster() { const r = (state.board && state.board.roster) || {}; return { people: r.people || {}, manual: r.manual || {}, hoursPerPoint: r.hoursPerPoint || 0 }; }
   function personWeeklyHours(login) { const h = roster().people[login]; return h ? Number(h) : 0; }
   function teamManualEntries(team) { const m = roster().manual[team]; return Array.isArray(m) ? m : []; }
   // Every team label present on the board (from issue labels), plus any team that
