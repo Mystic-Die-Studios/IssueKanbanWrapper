@@ -14,6 +14,7 @@
     activeLabels: new Set(), // label/team names toggled on (OR; empty => show all)
     sprint: 'all',       // iterationId | 'all'
     metaCache: {},       // repo -> { labels, milestones, assignees }
+    rosterPoll: null,    // interval id: refresh roster from server while its tab is open
   };
 
   // ---- tiny DOM helpers ----
@@ -2175,6 +2176,39 @@
     if (res && res.roster) state.board.roster = res.roster;
     renderSprintBar(); // capacity changed -> target velocities change
   }
+
+  // Pull the latest roster from the server (it's shared across instances, so
+  // another user's edits — e.g. a removal — only appear once we re-read it).
+  async function fetchRoster() {
+    try { const r = await api('/api/roster.php'); return (r && r.roster) || null; }
+    catch (e) { return null; }
+  }
+  // Poll while the Roster tab is open so edits from other instances show up.
+  // Skips a cycle if the user is actively editing a field (don't clobber focus).
+  function startRosterPolling() {
+    stopRosterPolling();
+    state.rosterPoll = setInterval(async () => {
+      if (state.view !== 'roster') { stopRosterPolling(); return; }
+      const active = document.activeElement;
+      if (active && $('#roster-view') && $('#roster-view').contains(active)) return;
+      const fresh = await fetchRoster();
+      if (!fresh || state.view !== 'roster') return;
+      if (JSON.stringify(fresh) !== JSON.stringify(state.board.roster)) {
+        state.board.roster = fresh;
+        renderRoster();
+        renderSprintBar();
+      }
+    }, 8000);
+  }
+  function stopRosterPolling() { if (state.rosterPoll) { clearInterval(state.rosterPoll); state.rosterPoll = null; } }
+
+  // Enter the Roster tab: re-read shared roster first, then render + poll.
+  async function enterRoster() {
+    const fresh = await fetchRoster();
+    if (fresh) { state.board.roster = fresh; renderSprintBar(); }
+    renderRoster();
+    startRosterPolling();
+  }
   // weekly hours for one team (git members counted once + manual hours)
   function teamWeeklyHours(team) {
     let h = 0;
@@ -2322,9 +2356,10 @@
     $('#timeline-view').classList.toggle('hidden', v !== 'timeline');
     $('#stats-view').classList.toggle('hidden', v !== 'stats');
     $('#roster-view').classList.toggle('hidden', v !== 'roster');
+    if (v !== 'roster') stopRosterPolling();
     if (v === 'stats') renderStats();
     if (v === 'timeline') renderTimeline();
-    if (v === 'roster') renderRoster();
+    if (v === 'roster') enterRoster();
   }
 
   // re-render whichever view is active (used after filter/sprint changes)
