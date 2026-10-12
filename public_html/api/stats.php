@@ -40,6 +40,7 @@ $isCancelledStatus = function (string $name): bool {
     return strpos($n, 'cancel') !== false || strpos($n, 'push') !== false;
 };
 
+$rows = [];
 foreach ($items as $it) {
     // Scope to selected sprint (by name; board.php derives it from the due date).
     if ($sprintFilter !== 'all' && $sprintFilter !== '') {
@@ -47,11 +48,33 @@ foreach ($items as $it) {
             continue;
         }
     }
+    $statusName = strtolower((string) ($it['fields'][$statusField]['name'] ?? ''));
+    $cancelled  = $isCancelledStatus($statusName);
+    $rows[] = [
+        'cancelled' => $cancelled,
+        'done'      => !$cancelled && ($statusName === $doneName),
+        'points'    => (float) ($it['fields'][$pointsField]['number'] ?? 0),
+        'assignees' => $it['assignees'],
+    ];
+}
 
-    $statusName  = strtolower((string) ($it['fields'][$statusField]['name'] ?? ''));
-    $isCancelled = $isCancelledStatus($statusName);
-    $isDone      = !$isCancelled && ($statusName === $doneName);
-    $points      = (float) ($it['fields'][$pointsField]['number'] ?? 0);
+// Archived sprints are hidden from the board but their points still count.
+foreach (($board['archives'] ?? []) as $a) {
+    if ($sprintFilter !== 'all' && $sprintFilter !== '' && strcasecmp((string) ($a['sprint'] ?? ''), $sprintFilter) !== 0) {
+        continue;
+    }
+    foreach (($a['issues'] ?? []) as $i) {
+        $rows[] = ['cancelled' => false, 'done' => true, 'points' => (float) ($i['points'] ?? 0), 'assignees' => $i['assignees'] ?? []];
+    }
+    foreach (($a['cancelled'] ?? []) as $c) {
+        $rows[] = ['cancelled' => true, 'done' => false, 'points' => (float) ($c['points'] ?? 0), 'assignees' => $c['assignees'] ?? []];
+    }
+}
+
+foreach ($rows as $row) {
+    $isCancelled = $row['cancelled'];
+    $isDone      = $row['done'];
+    $points      = $row['points'];
 
     $totals['totalItems']++;
     if ($isCancelled) {
@@ -66,7 +89,7 @@ foreach ($items as $it) {
     }
 
     // Attribute to each assignee (unassigned bucketed under "(unassigned)").
-    $assignees = $it['assignees'] ?: [['login' => '(unassigned)', 'name' => null, 'avatarUrl' => null]];
+    $assignees = $row['assignees'] ?: [['login' => '(unassigned)', 'name' => null, 'avatarUrl' => null]];
     foreach ($assignees as $a) {
         $login = $a['login'];
         if (!isset($people[$login])) {

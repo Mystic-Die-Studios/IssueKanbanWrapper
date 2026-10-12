@@ -558,7 +558,7 @@
         const r = await post('/api/archive.php', {
           op: 'archive', sprint: sprint.name,
           finished: finished.map((it) => ({ repo: it.repo, number: it.number, title: it.title, points: itemPoints(it), url: it.url, assignees: it.assignees })),
-          cancelled: cancelled.map((it) => ({ issueId: it.issueId, itemId: it.itemId, type: it.type, title: it.title, points: itemPoints(it) })),
+          cancelled: cancelled.map((it) => ({ issueId: it.issueId, itemId: it.itemId, type: it.type, title: it.title, points: itemPoints(it), assignees: it.assignees })),
         });
         if (state.sprint === sprint.name) state.sprint = 'all';
         if (r.failed && r.failed.length) showError('Could not delete: ' + r.failed.join(', '));

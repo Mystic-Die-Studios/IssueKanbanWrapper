@@ -49,13 +49,24 @@ if (!$sprint) {
 
 // Delete the cancelled issues first; any that fail are reported and left alone.
 $cancelledPoints = 0.0;
+$cancelledRecs = [];
 $failed = [];
 foreach ((is_array($in['cancelled'] ?? null) ? $in['cancelled'] : []) as $c) {
     $errs = delete_board_card((string) ($c['issueId'] ?? ''), (string) ($c['itemId'] ?? ''), (string) ($c['type'] ?? ''));
     if ($errs) {
         $failed[] = $c['title'] ?? ($c['issueId'] ?? '?');
     } else {
-        $cancelledPoints += (float) ($c['points'] ?? 0);
+        $pts = (float) ($c['points'] ?? 0);
+        $cancelledPoints += $pts;
+        // Kept (without the issue itself) so stats still count the cancelled points.
+        $cancelledRecs[] = [
+            'points'    => $pts,
+            'assignees' => array_map(fn($a) => [
+                'login'     => (string) ($a['login'] ?? ''),
+                'name'      => $a['name'] ?? null,
+                'avatarUrl' => $a['avatarUrl'] ?? null,
+            ], is_array($c['assignees'] ?? null) ? $c['assignees'] : []),
+        ];
     }
 }
 
@@ -86,6 +97,7 @@ $record = [
     'archivedAt'      => date('c'),
     'completedPoints' => $completedPoints,
     'cancelledPoints' => $cancelledPoints,
+    'cancelled'       => $cancelledRecs,
     'issues'          => $issues,
 ];
 $archives = store_list_mutate($pid, 'archives', function ($cur) use ($record) {
