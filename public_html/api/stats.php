@@ -41,7 +41,7 @@ $isCancelledStatus = function (string $name): bool {
 };
 
 foreach ($items as $it) {
-    // Scope to selected sprint (matched by name via the item's sprint label).
+    // Scope to selected sprint (by name; board.php derives it from the due date).
     if ($sprintFilter !== 'all' && $sprintFilter !== '') {
         if (($it['sprint'] ?? null) !== $sprintFilter) {
             continue;

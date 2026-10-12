@@ -12,9 +12,12 @@
     filterMine: false,
     filterHelpWanted: false, // show only "help wanted" issues
     activeLabels: new Set(), // label/team names toggled on (OR; empty => show all)
-    sprint: 'all',       // iterationId | 'all'
+    sprint: 'all',       // sprint name | 'all'
     metaCache: {},       // repo -> { labels, milestones, assignees }
     rosterPoll: null,    // interval id: refresh roster from server while its tab is open
+    modalGuard: null,    // () => true while the open modal has unsaved edits
+    tlZoom: 1,           // timeline zoom level (index into TL_DAY_PX)
+    tlAnchor: null,      // timeline: day number at the left edge, kept across re-renders
   };
 
   // ---- tiny DOM helpers ----
@@ -72,19 +75,21 @@
     const f = fieldMeta(cfg().statusField);
     return (f && f.options) ? f.options : [];
   }
-  // Sprints are tracked internally (state.board.sprints) and membership is a label.
+  // Sprints are tracked internally (state.board.sprints, auto-created every two
+  // weeks server-side) and an issue's sprint is derived from its due date.
   function sprintList() { return state.board.sprints || []; }
   function sprintByName(name) { return sprintList().find((s) => s.name === name) || null; }
-  // Defined sprints (with dates) merged with any sprint names discovered on issue
-  // labels — so sprints still appear even if the definitions file isn't present.
-  function allSprints() {
-    const byName = new Map();
-    sprintList().forEach((s) => byName.set(s.name, Object.assign({}, s)));
-    state.board.items.forEach((it) => {
-      const n = itemSprint(it);
-      if (n && !byName.has(n)) byName.set(n, { name: n });
+  function allSprints() { return sprintList().slice(); }
+  // The sprint whose [startDate, endDate] contains a due date (latest start wins
+  // on overlap), or null. Mirrors sprint_for_date() in api/store.php.
+  function sprintForDate(iso) {
+    if (!iso) return null;
+    let best = null;
+    sprintList().forEach((s) => {
+      if (!s.startDate || !s.endDate || iso < s.startDate || iso > s.endDate) return;
+      if (!best || s.startDate > best.startDate) best = s;
     });
-    return Array.from(byName.values());
+    return best;
   }
   function itemStatusName(it) { return (it.fields[cfg().statusField] || {}).name || null; }
   function itemPoints(it) { const f = cfg().pointsField; if (!f) return null; const v = it.fields[f]; return v ? v.number : null; }
@@ -92,6 +97,9 @@
   function itemStart(it) { return it.start || null; }
   function itemDue(it) { return it.due || null; }
   function fmtDue(iso) { try { return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); } catch (e) { return iso; } }
+  // Today as YYYY-MM-DD in the viewer's local time zone (not UTC, which flips a
+  // day early/late around midnight).
+  function todayIso() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
   function fmtDateTime(iso) { try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); } catch (e) { return iso; } }
 
   // Minimal, XSS-safe Markdown -> HTML for issue/comment bodies. All text is
@@ -144,7 +152,9 @@
   // GitHub IssueFieldSingleSelectOptionColor enum -> hex
   const ISSUE_COLORS = { GRAY: '6e7681', BLUE: '1f6feb', GREEN: '238636', YELLOW: '9e6a03', ORANGE: 'bc4c00', RED: 'cf222e', PINK: 'bf3989', PURPLE: '8250df' };
   function issueColor(name) { if (!name) return null; const h = ISSUE_COLORS[String(name).toUpperCase()]; return h ? '#' + h : null; }
-  function itemSprint(it) { return it.sprint || null; } // sprint name (from label) or null
+  // Sprint name from the due date (computed live, so a due-date edit moves the
+  // issue between sprints immediately), or null when no sprint covers it.
+  function itemSprint(it) { const s = sprintForDate(itemDue(it)); return s ? s.name : null; }
   function isDone(it) { return (itemStatusName(it) || '').toLowerCase() === (cfg().statusDone || '').toLowerCase(); }
   // Cancelled / pushed work: counted separately (shown red) so it doesn't read as "done".
   function isCancelled(it) { const s = (itemStatusName(it) || '').toLowerCase(); return s.includes('cancel') || s.includes('push'); }
@@ -169,6 +179,29 @@
   // stable "owner/repo#number" key for matching parent/child relationships
   function itemKey(it) { return (it.repo || '') + '#' + (it.number != null ? it.number : ''); }
   function parentKey(it) { return it.parent && it.parent.number != null ? (it.parent.repo || it.repo) + '#' + it.parent.number : null; }
+
+  // Index board items by "repo#number" (cached per board load; items are mutated
+  // in place on status change so the cached objects stay current).
+  let _itemIndex = null, _itemIndexFor = null;
+  function boardItemIndex() {
+    if (_itemIndexFor === state.board && _itemIndex) return _itemIndex;
+    _itemIndex = new Map();
+    (state.board.items || []).forEach((it) => { if (it.repo && it.number != null) _itemIndex.set(it.repo + '#' + it.number, it); });
+    _itemIndexFor = state.board;
+    return _itemIndex;
+  }
+  // How many of an issue's blockers are still active (not Done/Cancelled on the
+  // board). A blocker we can't find on the board is treated as still blocking.
+  function activeBlockerCount(it) {
+    const refs = it.blockedByRefs;
+    if (!refs) return it.blockedBy || 0;                 // legacy data w/o refs
+    if ((it.blockedBy || 0) > refs.length) return it.blockedBy; // some blockers weren't fetched
+    const idx = boardItemIndex();
+    return refs.filter((r) => { const b = idx.get(r.repo + '#' + r.number); return !b || !(isDone(b) || isCancelled(b)); }).length;
+  }
+  // Blocked only while it still has an active blocker; once every blocker moves to
+  // Done/Cancelled the issue reads as unblocked.
+  function isBlocked(it) { return activeBlockerCount(it) > 0; }
 
   // team-label helpers (a label is a "team" if it starts with the configured prefix)
   function teamPrefix() { return cfg().teamPrefix || ''; }
@@ -294,7 +327,7 @@
   // ---- sprint bar ----
   function isCurrentSprint(s) {
     if (s.closed || !s.startDate || !s.endDate) return false;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayIso();
     return s.startDate <= today && today <= s.endDate;
   }
   function fmtRange(s) {
@@ -327,6 +360,18 @@
       if (isCancelled(it)) { cancelled += pts; cancelledC++; }
       else if (isDone(it)) { done += pts; doneC++; }
     });
+    // Pushed-out work lives on as website-only snapshots in this sprint's
+    // Cancelled/Pushed column; count it as cancelled (red) so the achieved-points
+    // bar still reflects what was pushed. (Snapshots carry no labels, so they're
+    // only included when no team/label filter is narrowing the numbers.)
+    if (state.activeLabels.size === 0) {
+      boardSnapshots().forEach((s) => {
+        if (s.sprint !== name) return;
+        const pts = Number(s.points) || 0;
+        total += pts; totalC++;
+        cancelled += pts; cancelledC++;
+      });
+    }
     return { done, total, doneC, totalC, cancelled, cancelledC };
   }
 
@@ -418,6 +463,9 @@
       el('strong', { text: 'Sprints' }),
       el('button', { class: 'btn btn-ghost', text: '✕', onclick: closeModal }),
     ]));
+    body.appendChild(el('div', { class: 'bar-hint sprint-note', text:
+      'A new two-week sprint (Monday – Sunday) is created automatically, always one sprint ahead. '
+      + 'Issues belong to the sprint their due date falls in.' }));
 
     // existing sprints
     const list = el('div', { class: 'sprint-list' });
@@ -436,7 +484,7 @@
         } catch (e) { showError(e.message); }
       } });
       const delBtn = el('button', { class: 'btn chip-clear', text: 'Delete', onclick: async () => {
-        if (!confirm(`Delete sprint "${s.name}"? Issues keep their sprint label until reassigned.`)) return;
+        if (!confirm(`Delete sprint "${s.name}"? Issues due in it will have no sprint (their due dates are unchanged).`)) return;
         try {
           await sprintsApi({ op: 'delete', name: s.name });
           if (state.sprint === s.name) state.sprint = 'all';
@@ -480,8 +528,7 @@
   async function sprintsApi(payload) {
     const res = await post('/api/sprints.php', payload);
     state.board.sprints = res.sprints || [];
-    renderSprintBar();
-    if (state.view === 'stats') renderStats();
+    rerender(); // sprint dates decide which issues are in which sprint
     return res;
   }
 
@@ -499,15 +546,6 @@
     if (after.length) return after[0].name;
     return others.slice().sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''))[0].name;
   }
-  // Swap an item's sprint label to `sprintName` (or clear with null), updating local state.
-  async function assignSprintLabel(it, sprintName) {
-    const res = await post('/api/sprint-assign.php', { repo: it.repo, number: it.number, labels: it.labels.map((l) => l.name), sprint: sprintName || null });
-    const names = res.labels || [];
-    const known = new Map(it.labels.map((l) => [l.name, l]));
-    it.labels = names.map((n) => known.get(n) || { name: n, color: '5319e7' });
-    it.sprint = sprintName || null;
-  }
-
   function openRollover(sprint) {
     $('#modal').classList.remove('hidden');
     const body = $('#modal-body');
@@ -574,11 +612,20 @@
 
       const it = candidates[idx];
 
-      // target sprint + status controls for a push
+      // target sprint + status controls for a push. Sprint membership follows the
+      // due date, so pushing moves the due date to the target sprint's last day.
       const targetSel = el('select', { class: 'inp' }, others.length
         ? others.map((o) => el('option', { value: o.name, text: o.name }))
         : [el('option', { value: '', text: '— no other sprint —' })]);
       if (nextDefault) targetSel.value = nextDefault;
+      const pushNote = el('div', { class: 'bar-hint' });
+      const updatePushNote = () => {
+        const t = sprintByName(targetSel.value);
+        pushNote.textContent = !cfg().dueField ? 'No due-date field on this board, so issues can’t be pushed.'
+          : (t && t.endDate) ? `Due date moves to ${fmtDue(t.endDate)} (last day of ${t.name}).` : '';
+      };
+      targetSel.addEventListener('change', updatePushNote);
+      updatePushNote();
       const statusSel = el('select', { class: 'inp' }, statusOptions().map((o) => el('option', { value: o.id, text: o.name })));
       // default the push status to the first (leftmost / Todo) column
       if (statusOptions()[0]) statusSel.value = statusOptions()[0].id;
@@ -596,18 +643,19 @@
       const pushRow = el('div', { class: 'rollover-push' }, [
         el('span', { class: 'field-label', text: 'Push to' }), targetSel,
         el('span', { class: 'field-label', text: 'as' }), statusSel,
-        el('button', { class: 'btn btn-primary', text: 'Push →', disabled: others.length ? undefined : 'disabled',
+        el('button', { class: 'btn btn-primary', text: 'Push →', disabled: (others.length && cfg().dueField) ? undefined : 'disabled',
           onclick: () => guarded(async () => {
-            const target = targetSel.value;
+            const target = sprintByName(targetSel.value);
             if (!target) { showError('No sprint to push to — create one first.'); return; }
+            if (!target.endDate) { showError(`${target.name} has no end date to move the due date to.`); return; }
             // 1) frozen website-only copy stays in this sprint's cancelled/pushed column
             const r = await post('/api/snapshot.php', { op: 'add', snapshot: {
               sprint: sprint.name, repo: it.repo, number: it.number, title: it.title,
-              points: pts, url: it.url, assignees: it.assignees, pushedTo: target,
+              points: pts, url: it.url, assignees: it.assignees, pushedTo: target.name,
             } });
             state.board.snapshots = r.snapshots || [];
-            // 2) move the real issue forward + reset its status
-            await assignSprintLabel(it, target);
+            // 2) move the real issue forward (due date into the target sprint) + reset its status
+            await setDateField(it, cfg().dueField, target.endDate);
             if (statusSel.value) await moveCard(it.itemId, statusSel.value);
             tally.pushed++; advance();
           }) }),
@@ -622,7 +670,7 @@
         el('button', { class: 'btn', text: 'Skip', onclick: () => { tally.skipped++; advance(); } }),
       ]);
 
-      body.append(card, pushRow, actions);
+      body.append(card, pushRow, pushNote, actions);
     }
 
     render();
@@ -682,14 +730,14 @@
   }
 
   // ---- data-hygiene warnings (top-right ⚠ button) ----
-  // Open, real issues missing a sprint, points, or a date. Done and cancelled
-  // work is finished, so it's excluded. Each check is gated on the relevant
-  // field actually existing on the board. Backlog items are unscheduled by
+  // Open, real issues missing points or a date. (A missing due date also means
+  // no sprint, since sprints follow due dates.) Done and cancelled work is
+  // finished, so it's excluded. Each check is gated on the relevant field
+  // actually existing on the board. Backlog items are unscheduled by
   // definition, so their missing start/due dates are not flagged.
   function isBacklog(it) { return (itemStatusName(it) || '').toLowerCase().includes('backlog'); }
   function itemMissing(it) {
     const miss = [];
-    if (!itemSprint(it)) miss.push('no sprint');
     if (cfg().pointsField && !(itemPoints(it) > 0)) miss.push('no points');
     if (!isBacklog(it)) {
       if (cfg().startField && !itemStart(it)) miss.push('no start date');
@@ -724,7 +772,7 @@
     ]));
     body.append(...[
       modalHeader(el('strong', { text: `Needs attention — ${items.length} issue${items.length === 1 ? '' : 's'}` })),
-      el('div', { class: 'bar-hint', text: 'Open issues missing a sprint, points, or a date. Click one to fix it.' }),
+      el('div', { class: 'bar-hint', text: 'Open issues missing points or a date (no due date = no sprint). Click one to fix it.' }),
       el('div', { class: 'warn-list' }, rows),
     ]);
   }
@@ -833,7 +881,7 @@
         const row = el('div', { class: 'subissue' + (isDone(c) ? ' subissue-done' : ''), title: c.title }, [
           el('span', { class: 'subissue-num', text: '#' + c.number }),
           el('span', { class: 'subissue-title', text: c.title }),
-          c.blockedBy > 0 ? el('span', { class: 'subissue-flag', title: 'Blocked', text: '⛔' }) : null,
+          isBlocked(c) ? el('span', { class: 'subissue-flag', title: 'Blocked', text: '⛔' }) : null,
           c.blocking > 0 ? el('span', { class: 'subissue-flag', title: 'Blocking', text: '⚠' }) : null,
         ].filter(Boolean));
         row.addEventListener('click', (e) => { e.stopPropagation(); openCardModal(c); });
@@ -897,11 +945,11 @@
     const pts = itemPoints(it);
     const sprint = itemSprint(it);
     const due = itemDue(it);
-    const overdue = due && !isDone(it) && due < new Date().toISOString().slice(0, 10);
+    const overdue = due && !isDone(it) && due < todayIso();
     const meta = el('div', { class: 'card-meta' }, [
       it.number ? el('span', { class: 'card-num', text: '#' + it.number }) : null,
       (it.parent && it.parent.number != null) ? el('span', { class: 'parent-badge', title: 'Sub-issue of #' + it.parent.number, text: '↳ #' + it.parent.number }) : null,
-      it.blockedBy > 0 ? el('span', { class: 'dep-badge dep-blocked', title: 'Blocked by ' + it.blockedBy + ' issue(s)', text: '⛔ blocked' }) : null,
+      isBlocked(it) ? el('span', { class: 'dep-badge dep-blocked', title: 'Blocked by ' + activeBlockerCount(it) + ' open issue(s)', text: '⛔ blocked' }) : null,
       it.blocking > 0 ? el('span', { class: 'dep-badge dep-blocking', title: 'Blocking ' + it.blocking + ' issue(s)', text: '⚠ blocking' + (it.blocking > 1 ? ' ' + it.blocking : '') }) : null,
       pts != null ? el('span', { class: 'pts-badge', text: pts + ' pts' }) : null,
       sprint ? el('span', { class: 'sprint-badge', text: '⏱ ' + sprint }) : null,
@@ -1068,7 +1116,19 @@
     return m;
   }
 
-  function closeModal() { $('#modal').classList.add('hidden'); $('#modal-body').innerHTML = ''; }
+  // Ask before throwing away unsaved edits (✕, Esc, backdrop, Back). Returns
+  // true when it's OK to leave the current modal content.
+  function confirmDiscard() {
+    if (!state.modalGuard || !state.modalGuard()) return true;
+    if (!confirm('You have unsaved changes. Discard them?')) return false;
+    state.modalGuard = null;
+    return true;
+  }
+  function closeModal() {
+    if (!confirmDiscard()) return;
+    state.modalGuard = null;
+    $('#modal').classList.add('hidden'); $('#modal-body').innerHTML = '';
+  }
 
   // ---- shared field-control builders (used by edit + create modals) ----
   function fieldRow(label, ...controls) {
@@ -1106,11 +1166,21 @@
     sel.value = currentOptionId || '';
     return sel;
   }
-  function buildSprintSelect(currentName) {
-    const sel = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })]);
-    allSprints().forEach((s) => sel.appendChild(el('option', { value: s.name, text: s.name + (s.closed ? ' (closed)' : '') })));
-    sel.value = currentName || '';
-    return sel;
+  // Read-only sprint readout for the edit/create forms. Sprints follow the due
+  // date, so this tracks the Due date input live instead of being editable.
+  function buildSprintDisplay(dueInput) {
+    const node = el('div', { class: 'inp inp-readonly', title: 'Set by the due date' });
+    const update = () => {
+      const due = dueInput ? dueInput.value : '';
+      const s = sprintForDate(due);
+      node.textContent = !dueInput ? 'No due-date field'
+        : s ? `${s.name} · ${fmtRange(s)}`
+        : due ? 'No sprint covers this date' : 'Set a due date';
+      node.classList.toggle('inp-readonly-empty', !s);
+    };
+    if (dueInput) { dueInput.addEventListener('input', update); dueInput.addEventListener('change', update); }
+    update();
+    return node;
   }
   function buildMilestoneSelect(milestones, current) {
     const sel = el('select', { class: 'inp' }, [el('option', { value: '', text: '— none —' })]);
@@ -1480,6 +1550,7 @@
   // field-editing form. Clicking a card lands here.
   function renderViewModal(it, meta) {
     meta = meta || { labels: [], milestones: [], assignees: [] };
+    state.modalGuard = null; // read-only: nothing to lose
     const body = $('#modal-body');
     body.innerHTML = '';
 
@@ -1548,13 +1619,13 @@
     const gridEntries = []; // small scalar fields, packed into a 2-column grid
 
     const backBtn = el('button', { class: 'btn btn-ghost', text: '← Back', title: 'Back to view',
-      onclick: () => renderViewModal(it, meta) });
+      onclick: () => { if (confirmDiscard()) renderViewModal(it, meta); } });
     const delBtn = (it.issueId || it.itemId) ? el('button', { class: 'btn btn-ghost btn-danger', text: '🗑 Delete', title: 'Delete this card', onclick: async () => {
       const isDraft = it.type === 'DraftIssue';
       const label = it.number ? ('issue #' + it.number + ' on GitHub') : ('draft "' + (it.title || '') + '"');
       if (!confirm('Permanently delete ' + label + '? This cannot be undone.')) return;
       delBtn.disabled = true; delBtn.textContent = 'Deleting…';
-      try { await post('/api/issue-delete.php', { issueId: it.issueId, itemId: it.itemId, type: it.type }); closeModal(); await refresh(); }
+      try { await post('/api/issue-delete.php', { issueId: it.issueId, itemId: it.itemId, type: it.type }); state.modalGuard = null; closeModal(); await refresh(); }
       catch (e) { delBtn.disabled = false; delBtn.textContent = '🗑 Delete'; showError(e.message); }
     } }) : null;
     const header = modalHeader(el('div', {}, [
@@ -1608,9 +1679,10 @@
       gridEntries.push({ label: 'Start date', control: startInput });
     }
 
-    // Due date
+    // Due date (also decides the sprint)
+    let dueInput = null;
     if (cfg().dueField) {
-      const dueInput = el('input', { class: 'inp', type: 'date', value: itemDue(it) || '' });
+      dueInput = el('input', { class: 'inp', type: 'date', value: itemDue(it) || '' });
       savers.push(mkSaver(
         () => (dueInput.value || '') !== (itemDue(it) || ''),
         async () => { await setDateField(it, cfg().dueField, dueInput.value === '' ? null : dueInput.value); }
@@ -1618,20 +1690,8 @@
       gridEntries.push({ label: 'Due date', control: dueInput });
     }
 
-    // Sprint (writes the sprint label)
-    const sprintSel = buildSprintSelect(itemSprint(it) || '');
-    savers.push(mkSaver(
-      () => (sprintSel.value || '') !== (itemSprint(it) || ''),
-      async () => {
-        const v = sprintSel.value || '';
-        const res = await post('/api/sprint-assign.php', { repo: it.repo, number: it.number, labels: it.labels.map((l) => l.name), sprint: v || null });
-        const names = res.labels || [];
-        const known = new Map(it.labels.map((l) => [l.name, l]));
-        it.labels = names.map((n) => known.get(n) || { name: n, color: '5319e7' });
-        it.sprint = v || null;
-      }
-    ));
-    gridEntries.push({ label: 'Sprint', control: sprintSel });
+    // Sprint: read-only, follows the due date
+    gridEntries.push({ label: 'Sprint (from due date)', control: buildSprintDisplay(dueInput) });
 
     // Milestone
     const msSel = buildMilestoneSelect(meta.milestones, it.milestone);
@@ -1650,7 +1710,7 @@
     buildEditableFields(it, savers).forEach((e) => gridEntries.push(e));
     const fieldGrid = el('div', { class: 'field-grid' }, gridEntries.map((e) => gridField(e.label, e.control)));
 
-    // Labels (Teams + Labels split); sprint labels are managed via the Sprint field.
+    // Labels (Teams + Labels split). Legacy sprint labels are hidden and left as-is.
     const labelSrc = meta.labels.length ? meta.labels : it.labels;
     const labelSecs = buildLabelSections(labelSrc, new Set(it.labels.map((l) => l.name)));
     const labelsDirty = () => {
@@ -1675,27 +1735,46 @@
       it.assignees = asgSrc.filter((u) => chosen.includes(u.login));
     }));
 
-    // One Save button, shown only while there are unsaved changes.
-    const saveBtn = el('button', { class: 'btn btn-primary btn-save hidden', text: 'Save', onclick: async () => {
-      saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+    // One Save button in a bar pinned to the bottom of the modal. It's always
+    // visible, and turns loud (highlighted, pulsing, with a change count) as soon
+    // as any control differs from its saved value.
+    const dirtyCount = () => savers.filter((s) => s.dirty()).length;
+    let saving = false;
+    const saveMsg = el('span', { class: 'savebar-msg' });
+    const saveBtn = el('button', { class: 'btn btn-primary btn-save', onclick: async () => {
+      saving = true; saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
       try {
         for (const s of savers) await s.apply();
         await refresh(); // re-fetch the board so the viewer reflects server truth
-        saveBtn.textContent = 'Saved ✓';
-        setTimeout(() => { saveBtn.disabled = false; saveBtn.textContent = 'Save'; refreshSaveBtn(); }, 1200);
+        saving = false; refreshSaveBtn();
+        saveMsg.textContent = '✓ Saved';
       } catch (e) {
-        saveBtn.disabled = false; saveBtn.textContent = 'Save'; refreshSaveBtn();
+        saving = false; refreshSaveBtn();
         showError(e.message);
       }
     } });
-    // Show Save whenever any control differs from its saved value. Field inputs,
-    // selects and checkboxes all bubble input/change, so one delegated listener
-    // on the modal body covers the whole form.
-    const refreshSaveBtn = () => { saveBtn.classList.toggle('hidden', !savers.some((s) => s.dirty())); };
-    body.addEventListener('input', refreshSaveBtn);
-    body.addEventListener('change', refreshSaveBtn);
+    const saveBar = el('div', { class: 'savebar' }, [saveMsg, saveBtn]);
+    const refreshSaveBtn = () => {
+      if (saving) return;
+      const n = dirtyCount();
+      saveBar.classList.toggle('dirty', n > 0);
+      saveBtn.disabled = n === 0;
+      saveBtn.textContent = n ? 'Save changes' : 'No changes';
+      saveMsg.textContent = n ? `${n} unsaved change${n === 1 ? '' : 's'}` : 'All changes saved';
+    };
+    refreshSaveBtn();
+    state.modalGuard = () => dirtyCount() > 0;
 
-    body.append(...[
+    // Field inputs, selects and checkboxes all bubble input/change, so one
+    // delegated listener on this form covers every control. Ctrl/Cmd+S saves.
+    const form = el('div', { class: 'edit-form' });
+    form.addEventListener('input', refreshSaveBtn);
+    form.addEventListener('change', refreshSaveBtn);
+    form.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); if (!saveBtn.disabled) saveBtn.click(); }
+    });
+
+    form.append(...[
       header,
       titleInput,
       fieldGrid,
@@ -1705,8 +1784,9 @@
       buildPrSection(it),
       el('div', { class: 'field-label', text: 'Description' }),
       bodyInput,
-      saveBtn,
+      saveBar,
     ].filter(Boolean));
+    body.appendChild(form);
   }
 
   // ---- create-mode helpers: same rich controls as the edit modal, but the
@@ -1849,17 +1929,18 @@
                                  : el('input', { class: 'inp', type: 'text', placeholder: 'owner/repo' });
     const repoVal = () => (repos.length ? repoSel.value : repoSel.value.trim());
 
-    // Default the sprint to the one currently selected on the board (unless the
-    // caller overrides it); default the status when launched from a column's +.
-    const sprintDefault = preset.sprint != null ? preset.sprint : (state.sprint && state.sprint !== 'all' ? state.sprint : '');
+    // Sprints follow the due date, so to land a new issue in the sprint currently
+    // selected on the board (or preset.sprint), default its due date to that
+    // sprint's last day. Default the status when launched from a column's +.
+    const sprintDefault = sprintByName(preset.sprint != null ? preset.sprint : state.sprint);
 
     const titleInput = el('input', { class: 'modal-title-input', placeholder: 'Issue title' });
     const bodyInput = el('textarea', { class: 'modal-body-input', rows: '6', placeholder: 'Description (optional)' });
     const statusSel = buildStatusSelect(preset.status || '');
-    const sprintSel = buildSprintSelect(sprintDefault);
     const pointsInput = cfg().pointsField ? el('input', { class: 'inp', type: 'number', step: '0.5', placeholder: 'pts' }) : null;
     const startInput = cfg().startField ? el('input', { class: 'inp', type: 'date' }) : null;
-    const dueInput = cfg().dueField ? el('input', { class: 'inp', type: 'date' }) : null;
+    const dueInput = cfg().dueField ? el('input', { class: 'inp', type: 'date', value: (sprintDefault && sprintDefault.endDate) || '' }) : null;
+    const sprintDisplay = buildSprintDisplay(dueInput);
 
     // Rich controls matching the edit modal (applied right after creation).
     const fieldEditors = buildCreateFieldEditors();
@@ -1891,7 +1972,7 @@
     }
     repoSel.addEventListener('change', loadRepoMeta);
 
-    const createBtn = el('button', { class: 'btn btn-primary', text: 'Create issue', onclick: async () => {
+    const createBtn = el('button', { class: 'btn btn-primary btn-save', text: 'Create issue', onclick: async () => {
       const repo = repoVal();
       if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) { showError('Choose a repo (owner/name)'); return; }
       if (!titleInput.value.trim()) { showError('Title is required'); return; }
@@ -1929,9 +2010,6 @@
         if (dueInput && dueInput.value !== '' && cfg().dueField) {
           await writeDate(res.itemId, res.issueId, cfg().dueField, dueInput.value);
         }
-        if (sprintSel.value) {
-          await post('/api/sprint-assign.php', { repo, number: res.number, labels, sprint: sprintSel.value });
-        }
         await fieldEditors.apply(res); // Priority/Effort/Size + custom fields
         await createRels.apply(res);   // relationships
         await createPrs.apply(res);    // linked PRs
@@ -1948,7 +2026,7 @@
       pointsInput ? gridField(cfg().pointsName, pointsInput) : null,
       startInput ? gridField('Start date', startInput) : null,
       dueInput ? gridField('Due date', dueInput) : null,
-      gridField('Sprint', sprintSel),
+      gridField('Sprint (from due date)', sprintDisplay),
     ].concat(fieldEditors.entries.map((e) => gridField(e.label, e.control))).filter(Boolean));
 
     body.append(...[
@@ -1961,7 +2039,7 @@
       createPrs.node,
       el('div', { class: 'field-label', text: 'Description' }),
       bodyInput,
-      createBtn,
+      el('div', { class: 'savebar' }, [el('span', { class: 'savebar-msg', text: 'Creates the issue on GitHub and adds it to the board' }), createBtn]),
     ].filter(Boolean));
 
     loadRepoMeta();
@@ -2088,7 +2166,38 @@
     return el('div', { class: 'stat-card' + (extra ? ' ' + extra : '') }, [el('div', { class: 'stat-value', text: value }), el('div', { class: 'stat-label', text: label })]);
   }
 
-  // ---- timeline view (issues by due date) ----
+  // ---- timeline view: horizontal calendar ----
+  // Days run left → right. Each issue sits on its due date — as a bar back to
+  // its start date when it has one — packed into lanes so nothing overlaps.
+  // Sprints are banded across the header (click one to filter to it), and
+  // timeline milestones (website-only markers stored in data/sprints.json) draw
+  // as vertical lines down the whole calendar. Click any date to add one.
+  const TL_DAY_PX = [16, 28, 44];   // px per day at each zoom level
+  const TL_LANE_H = 28;             // px per row of issues
+  const TL_LABEL_MAX = 240;         // px cap on an issue's title label (matches .tl-label)
+  const TL_HEAD = { months: 24, sprints: 26, msLane: 22, days: 34 }; // header row heights
+  const TL_MS_COLORS = ['f0b429', 'e5534b', 'a371f7', '3fb950', '2f81f7'];
+
+  // Calendar maths on whole UTC day numbers, so DST / time zones can't shift a date.
+  const DAY_MS = 86400000;
+  function isoToDay(iso) { const p = iso.split('-'); return Date.UTC(+p[0], +p[1] - 1, +p[2]) / DAY_MS; }
+  function dayToDate(d) { return new Date(d * DAY_MS); }
+  function dayToIso(d) { return dayToDate(d).toISOString().slice(0, 10); }
+  function weekday(d) { return (d + 3) % 7; } // 0 = Monday … 6 = Sunday (day 0, 1970-01-01, was a Thursday)
+  function fmtDay(d) { return dayToDate(d).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }); }
+
+  let _measureCtx = null;
+  function textWidth(text, font) {
+    if (!_measureCtx) _measureCtx = document.createElement('canvas').getContext('2d');
+    _measureCtx.font = font;
+    return _measureCtx.measureText(text).width;
+  }
+
+  function timelineMilestones() { return state.board.timelineMilestones || []; }
+  function msColor(m) { return /^[0-9a-f]{6}$/i.test(m.color || '') ? m.color : TL_MS_COLORS[0]; }
+  // An issue's bar starts at its start date when that's on/before the due date.
+  function itemBarStart(it) { const s = itemStart(it), d = itemDue(it); return isoToDay(s && s <= d ? s : d); }
+
   function renderTimeline() {
     const root = $('#timeline-view');
     root.innerHTML = '';
@@ -2109,65 +2218,273 @@
       return;
     }
 
-    const all = visibleItems();
-    const dated = all.filter((it) => itemDue(it)).sort((a, b) => itemDue(a).localeCompare(itemDue(b)));
-    const noDue = all.length - dated.length;
+    const today = isoToDay(todayIso());
+    const inView = visibleItems();
+    const dated = inView.filter((it) => /^\d{4}-\d{2}-\d{2}$/.test(itemDue(it) || ''));
+    const sel = state.sprint !== 'all' ? sprintByName(state.sprint) : null;
 
-    if (!dated.length) {
-      root.appendChild(el('div', { class: 'loading', text: 'No issues with due dates in the current view.' }));
-      if (noDue) root.appendChild(el('div', { class: 'bar-hint', text: `${noDue} issue(s) have no due date.` }));
-      return;
+    // Visible range: the selected sprint, or today −2 weeks … +6 weeks, widened
+    // to cover the issues in view (and, across all sprints, every milestone)
+    // — but never so far that one typo'd year renders thousands of columns —
+    // then snapped out to whole Monday–Sunday weeks.
+    let from, to;
+    if (sel && sel.startDate && sel.endDate) { from = isoToDay(sel.startDate); to = isoToDay(sel.endDate); }
+    else {
+      from = today - 14; to = today + 42;
+      timelineMilestones().forEach((m) => { const d = isoToDay(m.date); from = Math.min(from, d); to = Math.max(to, d); });
     }
+    const center = from;
+    dated.forEach((it) => { from = Math.min(from, itemBarStart(it)); to = Math.max(to, isoToDay(itemDue(it))); });
+    from = Math.max(from, center - 400); to = Math.min(to, center + 550);
+    from -= weekday(from); to += 6 - weekday(to);
 
-    const today = new Date().toISOString().slice(0, 10);
-    const addDays = (n) => { const x = new Date(today + 'T00:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
-    const weekEnd = addDays(7), monthEnd = addDays(30);
+    const days = to - from + 1;
+    // Attach the (empty) scroller first so short ranges (a single sprint) can
+    // stretch to exactly fill its width.
+    const canvas = el('div', { class: 'tl-canvas' });
+    const scroller = el('div', { class: 'tl-scroll' }, [canvas]);
+    root.appendChild(scroller);
+    const dayW = Math.max(TL_DAY_PX[state.tlZoom], scroller.clientWidth / days);
+    const width = days * dayW;
+    const x = (d) => (d - from) * dayW;
+    const family = getComputedStyle(document.body).fontFamily;
+    const labelFont = '12px ' + family, flagFont = '600 11px ' + family, monthFont = '600 12px ' + family;
 
-    const buckets = [
-      { label: 'Overdue',     match: (d) => d < today },
-      { label: 'Today',       match: (d) => d === today },
-      { label: 'Next 7 days', match: (d) => d > today && d <= weekEnd },
-      { label: 'This month',  match: (d) => d > weekEnd && d <= monthEnd },
-      { label: 'Later',       match: (d) => d > monthEnd },
-    ];
-
-    buckets.forEach((b) => {
-      const rows = dated.filter((it) => b.match(itemDue(it)));
-      if (!rows.length) return;
-      const pts = rows.reduce((s, it) => s + (itemPoints(it) || 0), 0);
-      const head = el('div', { class: 'tl-bucket-head' }, [
-        el('span', { class: 'tl-bucket-label', text: b.label }),
-        el('span', { class: 'tl-bucket-meta', text: `${rows.length} · ${pts} pts` }),
-      ]);
-      const list = el('div', { class: 'tl-rows' }, rows.map((it) => timelineRow(it, today)));
-      root.appendChild(el('div', { class: 'tl-bucket' }, [head, list]));
+    // Issues → lanes (first fit by left edge; each item reserves its bar plus
+    // label). The label goes inside a bar long enough to hold it, else right of
+    // the bar, else — near the end of the calendar — left of it.
+    const laid = dated
+      .filter((it) => { const d = isoToDay(itemDue(it)); return d >= from && d <= to; })
+      .map((it) => {
+        const due = isoToDay(itemDue(it));
+        const start = Math.max(from, itemBarStart(it));
+        const label = (it.number ? '#' + it.number + ' ' : '') + it.title;
+        const x0 = x(start), x1 = x(due + 1);
+        const labelW = 4 + (it.assignees.length ? 22 : 0) + Math.min(TL_LABEL_MAX, textWidth(label, labelFont));
+        const mode = (x1 - x0 - 4 >= labelW + 12) ? 'inside'
+          : (x1 + labelW <= width - 4 || x0 - labelW < 0) ? 'right' : 'left';
+        return { it, due, start, label, x0, x1, mode, lo: mode === 'left' ? x0 - labelW : x0, hi: mode === 'right' ? x1 + labelW : x1 };
+      })
+      .sort((a, b) => a.lo - b.lo || a.due - b.due);
+    const laneEnds = [];
+    laid.forEach((r) => {
+      let lane = laneEnds.findIndex((e) => e + 8 <= r.lo);
+      if (lane === -1) { lane = laneEnds.length; laneEnds.push(0); }
+      laneEnds[lane] = r.hi; r.lane = lane;
     });
 
-    if (noDue) root.appendChild(el('div', { class: 'bar-hint', text: `${noDue} issue(s) in view have no due date.` }));
+    // Milestone flags → lanes the same way, so close-together flags stack.
+    const flags = timelineMilestones()
+      .map((m) => ({ m, d: isoToDay(m.date), color: '#' + msColor(m) }))
+      .filter((f) => f.d >= from && f.d <= to)
+      .sort((a, b) => a.d - b.d);
+    const flagEnds = [];
+    flags.forEach((f) => {
+      f.x = x(f.d) + Math.floor(dayW / 2); // the line runs down the middle of its day
+      let lane = flagEnds.findIndex((e) => e + 6 <= f.x);
+      if (lane === -1) { lane = flagEnds.length; flagEnds.push(0); }
+      flagEnds[lane] = f.x + textWidth(f.m.title, flagFont) + 18;
+      f.lane = lane;
+    });
+
+    // ---- header (sticky): months / sprints / milestone flags / days ----
+    const months = el('div', { class: 'tl-hrow', style: `height:${TL_HEAD.months}px` });
+    for (let d = from; d <= to;) {
+      const dt = dayToDate(d);
+      const next = Math.min(to + 1, Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + 1, 1) / DAY_MS);
+      const span = (next - d) * dayW;
+      // "October 2026", or just "Oct" / nothing for a sliver of a month at the edge
+      const name = [{ month: 'long', year: 'numeric' }, { month: 'short' }]
+        .map((o) => dt.toLocaleDateString(undefined, Object.assign({ timeZone: 'UTC' }, o)))
+        .find((t) => textWidth(t, monthFont) + 20 <= span) || '';
+      months.appendChild(el('div', { class: 'tl-month', style: `left:${x(d)}px;width:${span}px` }, [el('span', { text: name })]));
+      d = next;
+    }
+
+    const sprintsRow = el('div', { class: 'tl-hrow', style: `height:${TL_HEAD.sprints}px` });
+    sprintList().forEach((s) => {
+      if (!s.startDate || !s.endDate) return;
+      const a = Math.max(from, isoToDay(s.startDate)), b = Math.min(to, isoToDay(s.endDate));
+      if (a > b) return;
+      const on = state.sprint === s.name;
+      sprintsRow.appendChild(el('div', {
+        class: 'tl-sprint' + (isCurrentSprint(s) ? ' current' : '') + (on ? ' active' : ''),
+        style: `left:${x(a) + 1}px;width:${(b - a + 1) * dayW - 2}px`,
+        title: `${s.name} · ${fmtRange(s)} — click to ${on ? 'show all sprints' : 'show only this sprint'}`,
+        onclick: () => { state.sprint = on ? 'all' : s.name; rerender(); },
+      }, [el('span', { text: s.name + (s.closed ? ' ✓' : '') })]));
+    });
+    if (!sprintsRow.children.length) sprintsRow.appendChild(el('span', { class: 'tl-row-hint', text: 'No sprints in this range' }));
+
+    const msRow = el('div', { class: 'tl-hrow tl-msrow', style: `height:${Math.max(1, flagEnds.length) * TL_HEAD.msLane + 4}px` });
+    if (!flags.length) msRow.appendChild(el('span', { class: 'tl-row-hint', text: 'No milestones yet. Click a date below or “+ Milestone” to add one.' }));
+    flags.forEach((f) => {
+      msRow.appendChild(el('div', {
+        class: 'tl-ms-flag',
+        style: `left:${f.x - 1}px;top:${2 + f.lane * TL_HEAD.msLane}px;border-color:${f.color};background:${f.color}33`,
+        title: `${f.m.title} — ${fmtDay(f.d)} (click to edit)`,
+        onclick: () => openMilestoneEditor(f.m),
+      }, [f.m.title]));
+    });
+
+    const daysRow = el('div', { class: 'tl-hrow tl-days', style: `height:${TL_HEAD.days}px` });
+    for (let d = from; d <= to; d++) {
+      const wd = weekday(d);
+      daysRow.appendChild(el('div', {
+        class: 'tl-day' + (wd >= 5 ? ' weekend' : '') + (wd === 0 ? ' week-start' : '') + (d === today ? ' today' : ''),
+        style: `left:${x(d)}px;width:${dayW}px`,
+        title: fmtDay(d) + ' — click to add a milestone',
+        onclick: () => openMilestoneEditor({ date: dayToIso(d) }),
+      }, [
+        dayW >= 24 ? el('span', { class: 'tl-dow', text: 'MTWTFSS'[wd] }) : null,
+        el('span', { class: 'tl-dnum', text: String(dayToDate(d).getUTCDate()) }),
+      ]));
+    }
+
+    const head = el('div', { class: 'tl-head' }, [months, sprintsRow, msRow, daysRow]);
+    // Each milestone's line starts under its flag and runs through the day row…
+    const msTop = TL_HEAD.months + TL_HEAD.sprints + 2;
+    flags.forEach((f) => head.appendChild(el('div', { class: 'tl-ms-line',
+      style: `left:${f.x - 1}px;top:${msTop + f.lane * TL_HEAD.msLane}px;bottom:0;background:${f.color}` })));
+
+    // ---- body: week grid, sprint boundaries, today, issues ----
+    const body = el('div', { class: 'tl-body', style: [
+      `height:${Math.max(laneEnds.length * TL_LANE_H + 16, 200)}px`,
+      // week separators + weekend shading; the range starts on a Monday so a 7-day tile lines up
+      `background-image:linear-gradient(90deg, var(--border) 1px, transparent 1px), linear-gradient(90deg, transparent ${5 * dayW}px, var(--tl-weekend) ${5 * dayW}px)`,
+      `background-size:${7 * dayW}px 100%`,
+    ].join(';') });
+    sprintList().forEach((s) => {
+      const d = s.startDate ? isoToDay(s.startDate) : NaN;
+      if (d > from && d <= to) body.appendChild(el('div', { class: 'tl-sprint-line', style: `left:${x(d)}px` }));
+    });
+    if (today >= from && today <= to) body.appendChild(el('div', { class: 'tl-today', style: `left:${x(today)}px;width:${dayW}px` }));
+
+    laid.forEach((r) => {
+      const it = r.it;
+      const cls = isDone(it) ? ' is-done' : isCancelled(it) ? ' is-cancelled' : r.due < today ? ' is-overdue' : '';
+      const a = it.assignees[0];
+      const pts = itemPoints(it);
+      const tip = [
+        r.label,
+        'Due ' + fmtDue(itemDue(it)) + (r.start < r.due ? ` (from ${fmtDue(itemStart(it))})` : ''),
+        [itemStatusName(it), pts != null ? pts + ' pts' : null, itemSprint(it)].filter(Boolean).join(' · '),
+        it.assignees.map(personName).join(', '),
+      ].filter(Boolean).join('\n');
+      // A left-labelled item is anchored by its right edge so the bar still ends
+      // on the due date; an inside-labelled one is exactly the bar's width.
+      const barW = Math.max(6, r.x1 - r.x0 - 4);
+      const pos = r.mode === 'left' ? `right:${width - r.x1 + 2}px`
+        : `left:${r.x0 + 2}px` + (r.mode === 'inside' ? `;width:${barW}px` : '');
+      body.appendChild(el('div', {
+        class: 'tl-item tl-label-' + r.mode + cls, style: `${pos};top:${8 + r.lane * TL_LANE_H}px`, title: tip,
+        onclick: () => openCardModal(it),
+      }, [
+        el('span', { class: 'tl-bar' + (r.start < r.due ? '' : ' tl-bar-due'), style: `width:${barW}px` }),
+        a ? avatarEl(personName(a), a.avatarUrl, { size: 16 }) : null,
+        el('span', { class: 'tl-label', text: r.label }),
+      ]));
+    });
+    if (!laid.length) body.appendChild(el('div', { class: 'tl-empty', text: 'No issues with due dates in the current view.' }));
+    // …and on down the whole calendar.
+    flags.forEach((f) => body.appendChild(el('div', { class: 'tl-ms-line', style: `left:${f.x - 1}px;top:0;bottom:0;background:${f.color}` })));
+
+    canvas.style.width = width + 'px';
+    canvas.append(head, body);
+    const scrollToDay = (d, smooth) => scroller.scrollTo({ left: Math.max(0, x(d) - scroller.clientWidth / 4), behavior: smooth ? 'smooth' : 'auto' });
+
+    // ---- toolbar ----
+    const zoomBtn = (delta, text, title) => el('button', {
+      class: 'btn', text, title, disabled: TL_DAY_PX[state.tlZoom + delta] ? undefined : 'disabled',
+      onclick: () => { state.tlZoom += delta; renderTimeline(); },
+    });
+    const legendKey = (cls, text) => el('span', { class: 'tl-key' }, [el('i', { class: cls }), text]);
+    const undated = inView.length - dated.length, clipped = dated.length - laid.length;
+    const notes = [`${laid.length} issue${laid.length === 1 ? '' : 's'} by due date`];
+    if (undated) notes.push(`${undated} without a due date`);
+    if (clipped) notes.push(`${clipped} outside this range`);
+    const toolbar = el('div', { class: 'tl-toolbar' }, [
+      el('button', { class: 'btn', text: 'Today', title: 'Scroll to today', onclick: () => scrollToDay(today, true) }),
+      el('div', { class: 'tl-zoom' }, [zoomBtn(-1, '−', 'Zoom out'), zoomBtn(1, '+', 'Zoom in')]),
+      el('button', { class: 'btn tl-add-ms', text: '+ Milestone', title: 'Add a milestone line to the timeline',
+        onclick: () => openMilestoneEditor({ date: todayIso() }) }),
+      el('div', { class: 'tl-legend' }, [
+        legendKey('key-open', 'Open'), legendKey('key-overdue', 'Overdue'), legendKey('key-done', 'Done'),
+        legendKey('key-today', 'Today'), legendKey('key-ms', 'Milestone'),
+      ]),
+      el('span', { class: 'bar-hint', text: notes.join(' · ') }),
+    ]);
+
+    root.insertBefore(toolbar, scroller);
+    fitTimelineHeight();
+    // Keep the same date at the left edge across re-renders; otherwise open with
+    // today a quarter of the way in.
+    if (state.tlAnchor != null && state.tlAnchor >= from && state.tlAnchor <= to) scroller.scrollLeft = (state.tlAnchor - from) * dayW;
+    else scrollToDay(today >= from && today <= to ? today : from, false);
+    scroller.addEventListener('scroll', () => { state.tlAnchor = from + scroller.scrollLeft / dayW; }, { passive: true });
   }
 
-  function timelineRow(it, today) {
-    const due = itemDue(it);
-    const start = itemStart(it);
-    const overdue = due < today && !isDone(it);
-    const status = itemStatusName(it);
-    const pts = itemPoints(it);
-    const sprint = itemSprint(it);
-    const range = start ? (fmtDue(start) + ' → ' + fmtDue(due)) : null;
-    const row = el('div', { class: 'tl-row' + (isDone(it) ? ' tl-done' : ''), onclick: () => openCardModal(it) }, [
-      el('span', { class: 'tl-date' + (overdue ? ' overdue' : ''), text: fmtDue(due) }),
-      el('div', { class: 'tl-main' }, [
-        el('div', { class: 'tl-title', text: (it.number ? '#' + it.number + ' ' : '') + it.title }),
-        el('div', { class: 'tl-sub' }, [
-          range ? el('span', { class: 'tl-range', text: range }) : null,
-          status ? el('span', { class: 'tl-status', text: status }) : null,
-          sprint ? el('span', { class: 'sprint-badge', text: '⏱ ' + sprint }) : null,
-          pts != null ? el('span', { class: 'pts-badge', text: pts + ' pts' }) : null,
-        ].filter(Boolean)),
-      ]),
-      el('div', { class: 'tl-assignees' }, it.assignees.map((a) => avatarEl(personName(a), a.avatarUrl))),
-    ]);
-    return row;
+  // Cap the calendar's height to the window so its sticky header and horizontal
+  // scrollbar stay on screen however many lanes of issues there are.
+  function fitTimelineHeight() {
+    const sc = $('#timeline-view .tl-scroll');
+    if (!sc) return;
+    sc.style.maxHeight = Math.max(320, window.innerHeight - sc.getBoundingClientRect().top - 16) + 'px';
+  }
+
+  // Add / edit / delete a timeline milestone. `m` is an existing milestone, or
+  // { date } to start a new one on that date.
+  function openMilestoneEditor(m) {
+    const existing = !!m.id;
+    let color = existing ? msColor(m) : TL_MS_COLORS[0];
+    $('#modal').classList.remove('hidden');
+    const body = $('#modal-body');
+    body.innerHTML = '';
+
+    const title = el('input', { class: 'modal-title-input', placeholder: 'Milestone name, e.g. Alpha build', value: m.title || '', maxlength: '80' });
+    const date = el('input', { class: 'inp', type: 'date', value: m.date || todayIso() });
+    const swatches = el('div', { class: 'ms-swatches' });
+    const paint = () => {
+      swatches.innerHTML = '';
+      TL_MS_COLORS.forEach((c) => swatches.appendChild(el('button', {
+        class: 'ms-swatch' + (c === color ? ' on' : ''), style: `background:#${c}`, title: '#' + c, 'aria-label': 'Color #' + c,
+        onclick: () => { color = c; paint(); },
+      })));
+    };
+    paint();
+
+    const save = el('button', { class: 'btn btn-primary', text: existing ? 'Save milestone' : 'Add milestone', onclick: async () => {
+      if (!title.value.trim()) { showError('Give the milestone a name'); title.focus(); return; }
+      if (!date.value) { showError('Pick a date'); return; }
+      save.disabled = true;
+      try {
+        const fields = { title: title.value.trim(), date: date.value, color };
+        await milestonesApi(existing ? Object.assign({ op: 'update', id: m.id }, fields) : Object.assign({ op: 'create' }, fields));
+        closeModal();
+      } catch (e) { save.disabled = false; showError(e.message); }
+    } });
+    title.addEventListener('keydown', (e) => { if (e.key === 'Enter') save.click(); });
+    const del = existing ? el('button', { class: 'btn btn-danger', text: 'Delete', onclick: async () => {
+      if (!confirm(`Delete milestone "${m.title}"?`)) return;
+      try { await milestonesApi({ op: 'delete', id: m.id }); closeModal(); }
+      catch (e) { showError(e.message); }
+    } }) : null;
+
+    body.append(
+      modalHeader(el('strong', { text: existing ? 'Edit milestone' : 'New milestone' })),
+      el('div', { class: 'bar-hint ms-note', text: 'Milestones show as a vertical line down the whole timeline. They’re stored in this app only, not on GitHub.' }),
+      title,
+      el('div', { class: 'field-grid' }, [gridField('Date', date), gridField('Color', swatches)]),
+      el('div', { class: 'rollover-actions' }, [save, del].filter(Boolean)),
+    );
+    title.focus();
+  }
+
+  async function milestonesApi(payload) {
+    const res = await post('/api/timeline-milestones.php', payload);
+    state.board.timelineMilestones = res.milestones || [];
+    if (state.view === 'timeline') renderTimeline();
+    return res;
   }
 
   // ---- roster view ----
@@ -2379,6 +2696,7 @@
     try {
       state.board = await api('/api/board.php');
       renderSprintBar(); renderFilterBar(); renderBoard(); renderTopControls();
+      if (state.view === 'timeline') renderTimeline();
       if (state.view === 'stats') await renderStats();
     } catch (e) { showError(e.message); }
     finally { btn.textContent = old; btn.disabled = false; }
@@ -2433,7 +2751,8 @@
     $('#new-issue-btn').addEventListener('click', () => openCreateModal());
     $$('.tab').forEach((t) => t.addEventListener('click', () => setView(t.dataset.view)));
     $('#modal').addEventListener('click', (e) => { if (e.target.classList.contains('modal-backdrop')) closeModal(); });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) closeModal(); });
+    window.addEventListener('resize', () => { if (state.view === 'timeline') fitTimelineHeight(); });
   }
 
   document.addEventListener('DOMContentLoaded', boot);

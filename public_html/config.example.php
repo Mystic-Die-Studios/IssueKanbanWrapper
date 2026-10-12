@@ -51,7 +51,7 @@ return [
     'FIELD_SPRINT'        => 'Sprint',        // an Iteration field (unused; sprints are internal)
     'FIELD_POINTS'        => 'Story Points',  // a Number field (auto-creatable if missing)
     'FIELD_START'         => 'Start date',    // a Date field (optional; shown as a range on the timeline)
-    'FIELD_DUE'           => 'End date',      // a Date field used as the due date (auto-creatable if missing)
+    'FIELD_DUE'           => 'End date',      // a Date field used as the due date (auto-creatable if missing); also decides each issue's sprint
 
     // Which Status option counts as "done" for the stats view (case-insensitive).
     'STATUS_DONE'         => 'Done',
@@ -61,12 +61,12 @@ return [
     // the team "frontend". Set to '' to disable team grouping.
     'TEAM_PREFIX'         => 'team:',
 
-    // Sprints are tracked internally (definitions in data/sprints.json) and each
-    // issue's sprint membership is written as a GitHub label with this prefix,
-    // e.g. assigning "Sprint 3" adds the label "sprint:Sprint 3". These labels
-    // are hidden from the normal Labels filter and shown via the sprint bar.
-    // (FIELD_SPRINT above is no longer used unless you switch back to an
-    // Iteration field; it's kept for reference.)
+    // Sprints are tracked internally (definitions in data/sprints.json): a new
+    // two-week sprint (Monday – Sunday) is created automatically, one sprint
+    // ahead, and an issue belongs to the sprint its due date (FIELD_DUE) falls
+    // in. Older versions recorded membership as "sprint:<name>" labels; those
+    // labels are now ignored and just hidden from the Labels filter via this
+    // prefix. (FIELD_SPRINT above is unused; it's kept for reference.)
     'SPRINT_PREFIX'       => 'sprint:',
 
     // New issues default their Milestone to this (matched by title, case-insensitive).

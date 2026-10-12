@@ -255,6 +255,90 @@ function pv2_update_field(string $projectId, string $itemId, string $fieldId, ?a
 }
 
 /**
+ * Permanently delete a board card. Real issues go through deleteIssue (needs
+ * delete/admin rights on the repo); draft issues only live inside the project,
+ * so they're removed with deleteProjectV2Item — deleteIssue can't resolve a
+ * draft node id. Returns null on success, or GitHub's error list so the caller
+ * can clean up before reporting.
+ */
+function delete_board_card(string $issueId, string $itemId, string $type): ?array
+{
+    $isDraft = ($type === 'DraftIssue')
+            || (strncmp($issueId, 'DI_', 3) === 0)
+            || ($issueId === '' && $itemId !== '');
+
+    if ($isDraft) {
+        if (!$itemId) {
+            json_error("Missing 'itemId' for draft deletion", 400);
+        }
+        $mutation = <<<'GQL'
+        mutation($p: ID!, $i: ID!) {
+          deleteProjectV2Item(input: { projectId: $p, itemId: $i }) { deletedItemId }
+        }
+        GQL;
+        $res = gql($mutation, ['p' => config('PROJECT_ID'), 'i' => $itemId], true);
+    } else {
+        if (!$issueId) {
+            json_error("Missing 'issueId'", 400);
+        }
+        $mutation = <<<'GQL'
+        mutation($id: ID!) {
+          deleteIssue(input: { issueId: $id }) { repository { id } }
+        }
+        GQL;
+        $res = gql($mutation, ['id' => $issueId], true);
+    }
+    return $res['errors'] ?: null;
+}
+
+/**
+ * GraphQL selection for the timeline events that link pull requests to an
+ * issue. Paired with linked_prs(); shared by the board (PR icon on cards) and
+ * issue-links.php (the modal's list) so both agree on what "linked" means.
+ */
+const LINKED_PR_EVENTS = <<<'GQL'
+timelineItems(first: 100, itemTypes: [CONNECTED_EVENT, CROSS_REFERENCED_EVENT, DISCONNECTED_EVENT]) {
+  nodes {
+    __typename
+    ... on ConnectedEvent     { subject { __typename ... on PullRequest { number url title state isDraft } } }
+    ... on DisconnectedEvent  { subject { __typename ... on PullRequest { number } } }
+    ... on CrossReferencedEvent { source { __typename ... on PullRequest { number url title state isDraft } } }
+  }
+}
+GQL;
+
+/**
+ * The pull requests linked to an issue, from its LINKED_PR_EVENTS timeline
+ * nodes: any PR connected to or cross-referencing it, minus ones later
+ * disconnected. Returns [ {number, url, title, state, isDraft} ].
+ */
+function linked_prs(array $nodes): array
+{
+    $prs = [];           // number => pr
+    $disconnected = [];  // number => true
+    foreach ($nodes as $nd) {
+        $type = $nd['__typename'] ?? '';
+        if ($type === 'ConnectedEvent' && ($nd['subject']['__typename'] ?? '') === 'PullRequest') {
+            $p = $nd['subject']; $prs[$p['number']] = $p;
+        } elseif ($type === 'CrossReferencedEvent' && ($nd['source']['__typename'] ?? '') === 'PullRequest') {
+            $p = $nd['source']; $prs[$p['number']] = $p;
+        } elseif ($type === 'DisconnectedEvent' && ($nd['subject']['__typename'] ?? '') === 'PullRequest') {
+            $disconnected[$nd['subject']['number']] = true;
+        }
+    }
+    foreach (array_keys($disconnected) as $n) {
+        unset($prs[$n]);
+    }
+    return array_values(array_map(fn ($p) => [
+        'number'  => $p['number'] ?? null,
+        'url'     => $p['url'] ?? null,
+        'title'   => $p['title'] ?? null,
+        'state'   => $p['state'] ?? null,
+        'isDraft' => (bool) ($p['isDraft'] ?? false),
+    ], $prs));
+}
+
+/**
  * Fetch a repo issue via REST. Returns the decoded issue object.
  * Aborts with a JSON error if the issue can't be found.
  */

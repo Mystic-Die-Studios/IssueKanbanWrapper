@@ -84,7 +84,7 @@ function fetch_items(string $projectId): array
 {
     $levels = [
         ['feat' => 'sub_issues,issue_dependencies',
-         'rel'  => 'parent { number repository { nameWithOwner } } blockedBy(first: 1) { totalCount } blocking(first: 1) { totalCount }'],
+         'rel'  => 'parent { number repository { nameWithOwner } } blockedBy(first: 30) { totalCount nodes { number repository { nameWithOwner } } } blocking(first: 1) { totalCount }'],
         ['feat' => 'sub_issues',
          'rel'  => 'parent { number repository { nameWithOwner } }'],
         ['feat' => null, 'rel' => ''],
@@ -267,8 +267,14 @@ function normalize_item(array $node): array
                         ? ['number' => $content['parent']['number'] ?? null,
                            'repo'   => $content['parent']['repository']['nameWithOwner'] ?? null]
                         : null,
-        'blockedBy'   => (int) ($content['blockedBy']['totalCount'] ?? 0),  // issues blocking this one
-        'blocking'    => (int) ($content['blocking']['totalCount'] ?? 0),   // issues this one blocks
+        'blockedBy'   => (int) ($content['blockedBy']['totalCount'] ?? 0),  // # issues blocking this one
+        // The actual blockers (repo#number) so the client can treat this issue as
+        // unblocked once every blocker is Done/Cancelled on the board.
+        'blockedByRefs' => array_values(array_filter(array_map(function ($n) {
+            $num = $n['number'] ?? null;
+            return $num === null ? null : ['repo' => $n['repository']['nameWithOwner'] ?? null, 'number' => (int) $num];
+        }, $content['blockedBy']['nodes'] ?? []))),
+        'blocking'    => (int) ($content['blocking']['totalCount'] ?? 0),   // # issues this one blocks
     ];
 }
 
@@ -297,6 +303,11 @@ function fetch_board(): array
     $fields = fetch_fields($projectId);
     $items  = fetch_items($projectId);
 
+    // Keep the 2-week Monday sprint cadence topped up (backfilling any sprints
+    // missed while nobody loaded the board) before deriving membership from it.
+    sprints_autofill($projectId);
+    $sprints = sprints_get($projectId);
+
     // Resolve configured field names to the board's ACTUAL field names so a
     // case/spacing mismatch doesn't break writes. Returns the real name or null.
     $statusName = resolve_field_name($fields, config('FIELD_STATUS'), ['status'], 'SINGLE_SELECT');
@@ -318,22 +329,14 @@ function fetch_board(): array
     // rejects for issue fields.
     $issueFieldDefs = [];
 
-    // Derive sprint (from label) and start/due dates (from issue fields or
-    // project date fields) for each item.
+    // Derive start/due dates (from issue fields or project date fields) and, from
+    // the due date, the sprint for each item.
     foreach ($items as &$it) {
         foreach (($it['issueFields'] ?? []) as $n => $f) {
             if (!empty($f['fieldId']) && (!isset($issueFieldDefs[$n]) || (($f['type'] ?? '') === 'select' && empty($issueFieldDefs[$n]['options']) && !empty($f['options'])))) {
                 $def = ['id' => $f['fieldId'], 'type' => $f['type'] ?? null];
                 if (($f['type'] ?? '') === 'select') $def['options'] = $f['options'] ?? [];
                 $issueFieldDefs[$n] = $def;
-            }
-        }
-
-        $it['sprint'] = null;
-        foreach ($it['labels'] as $l) {
-            if (strpos($l['name'], $prefix) === 0) {
-                $it['sprint'] = substr($l['name'], strlen($prefix));
-                break;
             }
         }
 
@@ -347,6 +350,10 @@ function fetch_board(): array
         }
         $it['start'] = pick_date($dates, config('FIELD_START'), ['start']);
         $it['due']   = pick_date($dates, config('FIELD_DUE'), ['due', 'target', 'end', 'deadline']);
+
+        // Sprints are tracked by due date only: an issue is in the sprint whose
+        // window contains its due date. Legacy "sprint:" labels are ignored.
+        $it['sprint'] = sprint_for_date($sprints, $it['due']);
     }
     unset($it);
 
@@ -370,9 +377,10 @@ function fetch_board(): array
         'fields'      => $fields,
         'issueFields' => $issueFieldDefs,   // name => {id, type} for GitHub Issue fields
         'items'       => $items,
-        'sprints'     => sprints_get($projectId),
+        'sprints'     => $sprints,
         'snapshots'   => snapshots_get($projectId),
         'roster'      => roster_get($projectId),
+        'timelineMilestones' => timeline_milestones_get($projectId),
     ];
 }
 

@@ -5,14 +5,18 @@ a cleaner Kanban view and full read/write control of issues:
 
 - **Board view** with drag-and-drop between Status columns.
 - **"My issues"** toggle (by assignee) and **team toggles** (by label/tag), combinable.
-- **Sprints** via the board's Iteration field, with a sprint selector.
+- **Sprints** on an automatic two-week cadence (Monday – Sunday, created one sprint
+  ahead); an issue belongs to the sprint its **due date** falls in.
+- **Timeline**: a horizontal calendar of due dates with sprint bands and
+  vertical **milestone** lines (click any date to add one).
 - **Per-person stats**: completed tasks and sprint points, scoped to a sprint.
-- **Full edit**: Status, Story Points, Sprint, **labels, milestones, assignees, title/body**.
+- **Full edit**: Status, Story Points, dates (the due date sets the sprint), **labels, milestones, assignees, title/body**.
 - **GitHub OAuth** login; the token stays server-side in the PHP session.
 - **No database, no Composer, no build step** — drops straight onto cPanel.
 
-All sprint/points/status data lives in **GitHub Projects v2 fields** (the source of
-truth), so this app never drifts from GitHub's own UI.
+Points/status/dates live in **GitHub Projects v2 fields** (the source of truth), so
+this app never drifts from GitHub's own UI. Sprint definitions, roster and timeline
+milestones are app-only and stored in `public_html/data/sprints.json`.
 
 ---
 
@@ -39,6 +43,8 @@ never exposed to client JavaScript.
 | `public_html/api/field.php` | Set Story Points / Sprint |
 | `public_html/api/labels.php`, `milestone.php`, `assignees.php`, `issue.php` | Issue-level writes |
 | `public_html/api/stats.php` | Per-person completion & points aggregation |
+| `public_html/api/store.php` | `data/sprints.json` storage + the 2-week sprint cadence (auto-creation, due date → sprint) |
+| `public_html/api/sprints.php`, `timeline-milestones.php` | Manage sprints / Timeline milestone markers |
 | `public_html/assets/app.js`, `app.css` | Front-end |
 
 ---
@@ -48,7 +54,7 @@ never exposed to client JavaScript.
 Your Projects v2 board should use these fields (names are configurable):
 
 - **Status** — single-select (your Kanban columns, e.g. Todo / In Progress / Done).
-- **Sprint** — an **Iteration** field.
+- **Due date** — a **Date** field (`FIELD_DUE`); it decides each issue's sprint.
 - **Story Points** — a **Number** field.
 - **Teams** — GitHub **labels** on the issues (e.g. `team:frontend`); the team toggles filter by these.
 
@@ -142,9 +148,9 @@ Run 1–7 locally first, then repeat on the deployed HTTPS URL.
 1. **Auth:** sign in → redirected back, logged in.
 2. **Board:** columns match your Status options; cards show title, points, labels, assignees, milestone.
 3. **Filters:** "My issues" shows only your cards; team chips filter by label; they combine.
-4. **Sprint:** the selector scopes the board and stats to one iteration.
+4. **Sprint:** the selector scopes the board and stats to the issues due in one sprint.
 5. **Status write:** drag a card to a new column → reload → persisted (check GitHub's Projects UI).
-6. **Full read/write:** open a card → change Story Points, Sprint, labels, milestone, assignees, title/body → each persists in GitHub.
+6. **Full read/write:** open a card → change Story Points, due date, labels, milestone, assignees, title/body → each persists in GitHub (and a new due date moves the card to that date's sprint).
 7. **Stats:** per-person done counts and summed points match a manual count.
 
 ---
