@@ -306,7 +306,14 @@ function fetch_board(): array
     // Keep the 2-week Monday sprint cadence topped up (backfilling any sprints
     // missed while nobody loaded the board) before deriving membership from it.
     sprints_autofill($projectId);
-    $sprints = sprints_get($projectId);
+    $sprints = sprints_visible(sprints_get($projectId));
+    $archives = archives_get($projectId);
+
+    // Finished issues saved in an archive live on in the site's records only.
+    $archived = archived_issue_keys($archives);
+    if ($archived) {
+        $items = array_values(array_filter($items, fn($it) => !isset($archived[($it['repo'] ?? '') . '#' . ($it['number'] ?? '')])));
+    }
 
     // Resolve configured field names to the board's ACTUAL field names so a
     // case/spacing mismatch doesn't break writes. Returns the real name or null.
@@ -378,7 +385,7 @@ function fetch_board(): array
         'issueFields' => $issueFieldDefs,   // name => {id, type} for GitHub Issue fields
         'items'       => $items,
         'sprints'     => $sprints,
-        'snapshots'   => snapshots_get($projectId),
+        'archives'    => $archives,
         'roster'      => roster_get($projectId),
         'timelineMilestones' => timeline_milestones_get($projectId),
     ];

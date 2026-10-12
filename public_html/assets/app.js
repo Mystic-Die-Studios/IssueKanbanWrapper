@@ -166,16 +166,6 @@
     return n === want || n.replace(/-/g, ' ') === want.replace(/-/g, ' ');
   }
   function isHelpWanted(it) { return (it.labels || []).some((l) => isHelpWantedLabel(l.name)); }
-  // The Status option that represents cancelled/pushed work (the column ghosts
-  // live in, and where "leave cancelled" sends a real issue). null if none.
-  function cancelledStatusOption() {
-    return statusOptions().find((o) => { const s = (o.name || '').toLowerCase(); return s.includes('cancel') || s.includes('push'); }) || null;
-  }
-  function boardSnapshots() { return state.board.snapshots || []; }
-  // Website-only snapshots visible in the current sprint scope.
-  function visibleSnapshots() {
-    return boardSnapshots().filter((s) => state.sprint === 'all' || s.sprint === state.sprint);
-  }
   // stable "owner/repo#number" key for matching parent/child relationships
   function itemKey(it) { return (it.repo || '') + '#' + (it.number != null ? it.number : ''); }
   function parentKey(it) { return it.parent && it.parent.number != null ? (it.parent.repo || it.repo) + '#' + it.parent.number : null; }
@@ -326,7 +316,7 @@
 
   // ---- sprint bar ----
   function isCurrentSprint(s) {
-    if (s.closed || !s.startDate || !s.endDate) return false;
+    if (!s.startDate || !s.endDate) return false;
     const today = todayIso();
     return s.startDate <= today && today <= s.endDate;
   }
@@ -360,18 +350,6 @@
       if (isCancelled(it)) { cancelled += pts; cancelledC++; }
       else if (isDone(it)) { done += pts; doneC++; }
     });
-    // Pushed-out work lives on as website-only snapshots in this sprint's
-    // Cancelled/Pushed column; count it as cancelled (red) so the achieved-points
-    // bar still reflects what was pushed. (Snapshots carry no labels, so they're
-    // only included when no team/label filter is narrowing the numbers.)
-    if (state.activeLabels.size === 0) {
-      boardSnapshots().forEach((s) => {
-        if (s.sprint !== name) return;
-        const pts = Number(s.points) || 0;
-        total += pts; totalC++;
-        cancelled += pts; cancelledC++;
-      });
-    }
     return { done, total, doneC, totalC, cancelled, cancelledC };
   }
 
@@ -391,7 +369,7 @@
     sprints.forEach((s) => {
       bar.appendChild(sprintPill(
         s.name, state.sprint === s.name,
-        s.name + (s.closed ? ' ✓' : ''),
+        s.name,
         fmtRange(s), sprintProgress(s.name), isCurrentSprint(s),
         { hours: sprintTargetHours(s), points: sprintTargetPoints(s), scope: scopeNote }
       ));
@@ -476,10 +454,9 @@
     sprints.forEach((s) => {
       const start = el('input', { class: 'inp', type: 'date', value: s.startDate || '' });
       const end = el('input', { class: 'inp', type: 'date', value: s.endDate || '' });
-      const closed = el('input', { type: 'checkbox' }); closed.checked = !!s.closed;
       const saveBtn = el('button', { class: 'btn', text: 'Save', onclick: async () => {
         try {
-          await sprintsApi({ op: 'update', name: s.name, startDate: start.value || null, endDate: end.value || null, closed: closed.checked });
+          await sprintsApi({ op: 'update', name: s.name, startDate: start.value || null, endDate: end.value || null });
           flash(saveBtn, '✓');
         } catch (e) { showError(e.message); }
       } });
@@ -491,22 +468,46 @@
           renderSprintManager();
         } catch (e) { showError(e.message); }
       } });
-      const rollBtn = el('button', { class: 'btn', text: 'Close & roll over',
-        title: 'Review unfinished issues one by one: push each to another sprint (leaving a website-only copy here) or cancel it',
-        onclick: () => openRollover(s) });
+      const archBtn = el('button', { class: 'btn', text: 'Archive',
+        title: 'Save finished issues + points on the site and delete cancelled issues',
+        onclick: () => openArchive(s) });
       list.appendChild(el('div', { class: 'sprint-row' }, [
         el('div', { class: 'sprint-row-name' }, [
           isCurrentSprint(s) ? el('span', { class: 'pill-now', text: 'NOW' }) : null,
           el('strong', { text: s.name }),
-          s.closed ? el('span', { class: 'sprint-closed-tag', text: 'closed' }) : null,
         ]),
         el('label', { class: 'sprint-row-field' }, ['Start', start]),
         el('label', { class: 'sprint-row-field' }, ['End', end]),
-        el('label', { class: 'sprint-row-field check-row' }, [closed, 'Closed']),
-        el('div', { class: 'sprint-row-actions' }, [rollBtn, saveBtn, delBtn]),
+        el('div', { class: 'sprint-row-actions' }, [archBtn, saveBtn, delBtn]),
       ]));
     });
     body.appendChild(list);
+
+    // archived sprints (finished work + points saved by the site)
+    const archives = (state.board.archives || []).slice().sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
+    if (archives.length) {
+      body.appendChild(el('div', { class: 'field-label', text: 'Archived sprints' }));
+      const aList = el('div', { class: 'sprint-list' });
+      archives.forEach((a) => {
+        const rm = el('button', { class: 'btn chip-clear', text: 'Remove record', onclick: async () => {
+          if (!confirm(`Remove the archive record for "${a.sprint}"? Its saved issues will reappear on the board.`)) return;
+          try {
+            const r = await post('/api/archive.php', { op: 'delete', id: a.id });
+            state.board.archives = r.archives || [];
+            await refresh(); renderSprintManager();
+          } catch (e) { showError(e.message); }
+        } });
+        const rows = (a.issues || []).map((i) => el('div', { class: 'bar-hint', text:
+          `${i.repo}#${i.number} ${i.title}` + (i.points != null ? ` — ${i.points} pts` : '') }));
+        aList.appendChild(el('div', { class: 'sprint-row' }, [
+          el('div', { class: 'sprint-row-name' }, [el('strong', { text: a.sprint }), el('span', { class: 'sprint-closed-tag', text: 'archived' })]),
+          el('div', { class: 'bar-hint', text: `${fmtRange(a)} · ${(a.issues || []).length} finished issues · ${a.completedPoints} pts completed · ${a.cancelledPoints} pts cancelled` }),
+          el('details', {}, [el('summary', { text: 'Finished issues' }), ...rows]),
+          el('div', { class: 'sprint-row-actions' }, [rm]),
+        ]));
+      });
+      body.appendChild(aList);
+    }
 
     // create form
     const name = el('input', { class: 'inp', type: 'text', placeholder: 'e.g. Sprint 4' });
@@ -532,148 +533,42 @@
     return res;
   }
 
-  // ---- sprint close & roll over ----
-  // Real (non-draft), not-done, not-cancelled issues carrying this sprint's label.
-  function unfinishedInSprint(name) {
-    return (state.board.items || []).filter((it) =>
-      it.number && it.repo && itemSprint(it) === name && !isDone(it) && !isCancelled(it));
-  }
-  // Best default "next" sprint: the earliest one starting after this one, else the newest other.
-  function pickNextSprint(cur, others) {
-    if (!others.length) return '';
-    const start = cur.startDate || '';
-    const after = others.filter((o) => (o.startDate || '') > start).sort((a, b) => (a.startDate || '').localeCompare(b.startDate || ''));
-    if (after.length) return after[0].name;
-    return others.slice().sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''))[0].name;
-  }
-  function openRollover(sprint) {
-    $('#modal').classList.remove('hidden');
+  // ---- sprint archive ----
+  function openArchive(sprint) {
+    const items = (state.board.items || []).filter((it) => itemSprint(it) === sprint.name);
+    const finished = items.filter((it) => it.number && it.repo && isDone(it) && !isCancelled(it));
+    const cancelled = items.filter((it) => isCancelled(it));
+    const unfinished = items.length - finished.length - cancelled.length;
+    const pts = (list) => list.reduce((n, it) => n + (itemPoints(it) || 0), 0);
+
     const body = $('#modal-body');
-    const candidates = unfinishedInSprint(sprint.name);
-    const cancelledOpt = cancelledStatusOption();
-    const others = allSprints().filter((x) => x.name !== sprint.name);
-    const nextDefault = pickNextSprint(sprint, others);
-    const tally = { pushed: 0, cancelled: 0, skipped: 0 };
-    let idx = 0;
-    let busy = false;
-
-    const backBtn = el('button', { class: 'btn btn-ghost', text: '‹ Sprints', onclick: renderSprintManager });
-
-    async function advance() { idx++; render(); }
-
-    async function guarded(fn) {
-      if (busy) return;
-      busy = true;
-      try { await fn(); }
-      catch (e) { showError(e.message); }
-      finally { busy = false; }
-    }
-
-    async function finishClose(markClosed) {
-      await guarded(async () => {
-        if (markClosed) await sprintsApi({ op: 'update', name: sprint.name, startDate: sprint.startDate || null, endDate: sprint.endDate || null, closed: true });
+    body.innerHTML = '';
+    body.appendChild(el('div', { class: 'modal-head' }, [
+      el('strong', { text: `Archive ${sprint.name}` }),
+      el('button', { class: 'btn btn-ghost', text: '✕', onclick: closeModal }),
+    ]));
+    body.appendChild(el('div', { class: 'bar-hint', text:
+      `Saves ${finished.length} finished issue(s) (${pts(finished)} pts) on the site and removes them from the board. ` +
+      `Permanently deletes ${cancelled.length} cancelled issue(s) from GitHub (${pts(cancelled)} pts). ` +
+      (unfinished ? `${unfinished} unfinished issue(s) are left untouched and will have no sprint.` : '') }));
+    const go = el('button', { class: 'btn btn-primary', text: 'Archive sprint', onclick: async () => {
+      if (!confirm(`Archive "${sprint.name}"? Cancelled issues will be permanently deleted from GitHub.`)) return;
+      go.disabled = true; go.textContent = 'Archiving…';
+      try {
+        const r = await post('/api/archive.php', {
+          op: 'archive', sprint: sprint.name,
+          finished: finished.map((it) => ({ repo: it.repo, number: it.number, title: it.title, points: itemPoints(it), url: it.url, assignees: it.assignees })),
+          cancelled: cancelled.map((it) => ({ issueId: it.issueId, itemId: it.itemId, type: it.type, title: it.title, points: itemPoints(it) })),
+        });
+        if (state.sprint === sprint.name) state.sprint = 'all';
+        if (r.failed && r.failed.length) showError('Could not delete: ' + r.failed.join(', '));
         await refresh();
         renderSprintManager();
-      });
-    }
-
-    function render() {
-      body.innerHTML = '';
-      body.appendChild(el('div', { class: 'modal-head' }, [
-        el('strong', { text: `Close & roll over — ${sprint.name}` }),
-        el('div', { class: 'modal-head-actions' }, [backBtn, el('button', { class: 'btn btn-ghost', text: '✕', onclick: closeModal })]),
-      ]));
-
-      if (!candidates.length) {
-        body.appendChild(el('div', { class: 'bar-hint', text: 'No unfinished issues in this sprint. You can close it now.' }));
-        body.appendChild(el('div', { class: 'rollover-actions' }, [
-          el('button', { class: 'btn btn-primary', text: 'Mark sprint closed', onclick: () => finishClose(true) }),
-        ]));
-        return;
-      }
-
-      // progress
-      body.appendChild(el('div', { class: 'rollover-progress' }, [
-        el('span', { text: `Reviewing ${Math.min(idx + 1, candidates.length)} of ${candidates.length}` }),
-        el('span', { class: 'bar-hint', text: `pushed ${tally.pushed} · cancelled ${tally.cancelled} · skipped ${tally.skipped}` }),
-      ]));
-
-      if (idx >= candidates.length) {
-        body.appendChild(el('div', { class: 'rollover-done' }, [
-          el('div', { text: `Reviewed all ${candidates.length} issue(s): ${tally.pushed} pushed, ${tally.cancelled} cancelled, ${tally.skipped} skipped.` }),
-          el('div', { class: 'bar-hint', text: 'Pushed issues left a website-only copy in this sprint’s Cancelled/Pushed column.' }),
-        ]));
-        body.appendChild(el('div', { class: 'rollover-actions' }, [
-          el('button', { class: 'btn btn-primary', text: 'Mark sprint closed & finish', onclick: () => finishClose(true) }),
-          el('button', { class: 'btn', text: 'Finish (leave open)', onclick: () => finishClose(false) }),
-        ]));
-        return;
-      }
-
-      const it = candidates[idx];
-
-      // target sprint + status controls for a push. Sprint membership follows the
-      // due date, so pushing moves the due date to the target sprint's last day.
-      const targetSel = el('select', { class: 'inp' }, others.length
-        ? others.map((o) => el('option', { value: o.name, text: o.name }))
-        : [el('option', { value: '', text: '— no other sprint —' })]);
-      if (nextDefault) targetSel.value = nextDefault;
-      const pushNote = el('div', { class: 'bar-hint' });
-      const updatePushNote = () => {
-        const t = sprintByName(targetSel.value);
-        pushNote.textContent = !cfg().dueField ? 'No due-date field on this board, so issues can’t be pushed.'
-          : (t && t.endDate) ? `Due date moves to ${fmtDue(t.endDate)} (last day of ${t.name}).` : '';
-      };
-      targetSel.addEventListener('change', updatePushNote);
-      updatePushNote();
-      const statusSel = el('select', { class: 'inp' }, statusOptions().map((o) => el('option', { value: o.id, text: o.name })));
-      // default the push status to the first (leftmost / Todo) column
-      if (statusOptions()[0]) statusSel.value = statusOptions()[0].id;
-
-      const pts = itemPoints(it);
-      const card = el('div', { class: 'rollover-card' }, [
-        el('div', { class: 'rollover-card-title', text: (it.number ? '#' + it.number + ' ' : '') + it.title }),
-        el('div', { class: 'card-meta' }, [
-          pts != null ? el('span', { class: 'pts-badge', text: pts + ' pts' }) : null,
-          el('span', { class: 'card-status', text: itemStatusName(it) || '(no status)' }),
-        ].filter(Boolean)),
-        el('div', { class: 'card-assignees' }, it.assignees.map((a) => avatarEl(personName(a), a.avatarUrl))),
-      ]);
-
-      const pushRow = el('div', { class: 'rollover-push' }, [
-        el('span', { class: 'field-label', text: 'Push to' }), targetSel,
-        el('span', { class: 'field-label', text: 'as' }), statusSel,
-        el('button', { class: 'btn btn-primary', text: 'Push →', disabled: (others.length && cfg().dueField) ? undefined : 'disabled',
-          onclick: () => guarded(async () => {
-            const target = sprintByName(targetSel.value);
-            if (!target) { showError('No sprint to push to — create one first.'); return; }
-            if (!target.endDate) { showError(`${target.name} has no end date to move the due date to.`); return; }
-            // 1) frozen website-only copy stays in this sprint's cancelled/pushed column
-            const r = await post('/api/snapshot.php', { op: 'add', snapshot: {
-              sprint: sprint.name, repo: it.repo, number: it.number, title: it.title,
-              points: pts, url: it.url, assignees: it.assignees, pushedTo: target.name,
-            } });
-            state.board.snapshots = r.snapshots || [];
-            // 2) move the real issue forward (due date into the target sprint) + reset its status
-            await setDateField(it, cfg().dueField, target.endDate);
-            if (statusSel.value) await moveCard(it.itemId, statusSel.value);
-            tally.pushed++; advance();
-          }) }),
-      ]);
-
-      const actions = el('div', { class: 'rollover-actions' }, [
-        cancelledOpt
-          ? el('button', { class: 'btn btn-danger', text: 'Leave cancelled',
-              title: 'Set the real issue to ' + cancelledOpt.name + ' and keep it in this sprint',
-              onclick: () => guarded(async () => { await moveCard(it.itemId, cancelledOpt.id); tally.cancelled++; advance(); }) })
-          : el('span', { class: 'bar-hint', text: 'No Cancelled/Pushed status on the board — add one to enable cancelling.' }),
-        el('button', { class: 'btn', text: 'Skip', onclick: () => { tally.skipped++; advance(); } }),
-      ]);
-
-      body.append(card, pushRow, pushNote, actions);
-    }
-
-    render();
+      } catch (e) { go.disabled = false; go.textContent = 'Archive sprint'; showError(e.message); }
+    } });
+    body.appendChild(el('div', { class: 'rollover-actions' }, [
+      el('button', { class: 'btn btn-ghost', text: '‹ Sprints', onclick: renderSprintManager }), go,
+    ]));
   }
 
   // ---- filter bar: Teams (prefix) vs Labels, visually separated ----
@@ -840,14 +735,6 @@
     const columns = opts.map((o) => ({ name: o.name, optionId: o.id, items: buckets.get(o.name) }));
     if (noStatus.length) columns.push({ name: '(no status)', optionId: null, items: noStatus });
 
-    // Website-only snapshots (frozen copies of pushed issues) live in the
-    // Cancelled/Pushed column for the sprint they were pushed out of.
-    const cancelledOpt = cancelledStatusOption();
-    if (cancelledOpt) {
-      const col = columns.find((c) => c.optionId === cancelledOpt.id);
-      if (col) col.ghosts = visibleSnapshots();
-    }
-
     columns.forEach((col) => root.appendChild(renderColumn(col)));
   }
 
@@ -902,13 +789,6 @@
     });
     // any items orphaned by a relationship cycle: render flat so nothing vanishes
     col.items.forEach((it) => { if (!seen.has(itemKey(it))) { seen.add(itemKey(it)); body.appendChild(renderCard(it)); } });
-
-    // Website-only snapshots, rendered read-only below the real cards.
-    const ghosts = col.ghosts || [];
-    if (ghosts.length) {
-      body.appendChild(el('div', { class: 'ghost-sep', text: 'Pushed out · website-only' }));
-      ghosts.forEach((g) => body.appendChild(renderGhostCard(g)));
-    }
 
     body.addEventListener('dragover', (e) => { e.preventDefault(); body.classList.add('drag-over'); });
     body.addEventListener('dragleave', () => body.classList.remove('drag-over'));
@@ -996,27 +876,6 @@
     if (fieldChips) card.appendChild(fieldChips);
     if (sortedLabels.length) card.appendChild(labels);
     if (it.assignees.length) card.appendChild(avatars);
-    return card;
-  }
-
-  // Read-only "ghost" card for a website-only snapshot of a pushed issue.
-  function renderGhostCard(snap) {
-    const card = el('div', { class: 'card ghost-card', title: 'Website-only snapshot (not on GitHub)' });
-    card.appendChild(el('div', { class: 'card-title', text: (snap.number ? '#' + snap.number + ' ' : '') + snap.title }));
-    card.appendChild(el('div', { class: 'card-meta' }, [
-      el('span', { class: 'ghost-badge', text: '👻 pushed' + (snap.pushedTo ? ' → ' + snap.pushedTo : '') }),
-      (snap.points != null) ? el('span', { class: 'pts-badge', text: snap.points + ' pts' }) : null,
-    ].filter(Boolean)));
-    const avatars = el('div', { class: 'card-assignees' }, (snap.assignees || []).map((a) => avatarEl(personName(a), a.avatarUrl)));
-    const del = el('button', { class: 'ghost-del', title: 'Remove this website-only snapshot', text: '✕',
-      onclick: async (e) => {
-        e.stopPropagation();
-        if (!confirm('Remove this website-only snapshot? (The real issue is not affected.)')) return;
-        try { const r = await post('/api/snapshot.php', { op: 'delete', id: snap.id }); state.board.snapshots = r.snapshots || []; renderBoard(); }
-        catch (err) { showError(err.message); }
-      } });
-    card.appendChild(el('div', { class: 'ghost-foot' }, [avatars, del]));
-    if (snap.url) card.addEventListener('click', () => window.open(snap.url, '_blank', 'noopener'));
     return card;
   }
 
@@ -2312,7 +2171,7 @@
         style: `left:${x(a) + 1}px;width:${(b - a + 1) * dayW - 2}px`,
         title: `${s.name} · ${fmtRange(s)} — click to ${on ? 'show all sprints' : 'show only this sprint'}`,
         onclick: () => { state.sprint = on ? 'all' : s.name; rerender(); },
-      }, [el('span', { text: s.name + (s.closed ? ' ✓' : '') })]));
+      }, [el('span', { text: s.name })]));
     });
     if (!sprintsRow.children.length) sprintsRow.appendChild(el('span', { class: 'tl-row-hint', text: 'No sprints in this range' }));
 

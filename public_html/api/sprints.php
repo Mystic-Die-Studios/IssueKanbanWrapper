@@ -4,7 +4,7 @@
  *
  *   GET  /api/sprints.php                     -> { sprints: [...] }
  *   POST /api/sprints.php { op: "create", name, startDate?, endDate? }
- *   POST /api/sprints.php { op: "update", name, startDate?, endDate?, closed? }
+ *   POST /api/sprints.php { op: "update", name, startDate?, endDate? }
  *   POST /api/sprints.php { op: "delete", name }
  *
  * Sprint identity is its (case-insensitive) name, because membership is stored
@@ -19,7 +19,7 @@ require_auth();
 $projectId = config('PROJECT_ID');
 
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
-    json_out(['sprints' => sprints_get($projectId)]);
+    json_out(['sprints' => sprints_visible(sprints_get($projectId))]);
 }
 
 $in = json_input();
@@ -41,11 +41,10 @@ switch ($op) {
                 'name'      => $name,
                 'startDate' => $in['startDate'] ?? null,
                 'endDate'   => $in['endDate'] ?? null,
-                'closed'    => false,
             ];
             return $cur;
         });
-        json_out(['ok' => true, 'sprints' => $sprints]);
+        json_out(['ok' => true, 'sprints' => sprints_visible($sprints)]);
         // no break needed; json_out exits
 
     case 'update':
@@ -56,7 +55,6 @@ switch ($op) {
                 if (strcasecmp($s['name'], $name) === 0) {
                     if (array_key_exists('startDate', $in)) $s['startDate'] = $in['startDate'];
                     if (array_key_exists('endDate', $in))   $s['endDate']   = $in['endDate'];
-                    if (array_key_exists('closed', $in))    $s['closed']    = (bool) $in['closed'];
                     $found = true;
                 }
             }
@@ -66,14 +64,14 @@ switch ($op) {
             }
             return $cur;
         });
-        json_out(['ok' => true, 'sprints' => $sprints]);
+        json_out(['ok' => true, 'sprints' => sprints_visible($sprints)]);
 
     case 'delete':
         $name = (string) ($in['name'] ?? '');
         $sprints = sprints_mutate($projectId, function (array $cur) use ($name) {
             return array_filter($cur, fn($s) => strcasecmp($s['name'], $name) !== 0);
         });
-        json_out(['ok' => true, 'sprints' => $sprints]);
+        json_out(['ok' => true, 'sprints' => sprints_visible($sprints)]);
 
     default:
         json_error("Unknown op '$op'", 400);

@@ -478,27 +478,10 @@ html, body {
 .sprint-closed-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
   border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
 
-/* ---- website-only snapshot (ghost) cards ---- */
-.ghost-sep { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
-  margin: 6px 2px 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
-.card.ghost-card { background: repeating-linear-gradient(135deg, var(--panel) 0 8px, var(--panel-2) 8px 16px);
-  border-style: dashed; opacity: .92; cursor: default; }
-.card.ghost-card:hover { border-color: #e5534b; }
-.ghost-badge { background: #e5534b; color: #fff; border-radius: 999px; padding: 1px 8px; font-size: 11px; }
-.ghost-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+/* ---- small action buttons / action rows ---- */
 .ghost-del { background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 6px; }
 .ghost-del:hover { background: var(--danger); color: #fff; }
-
-/* ---- sprint close & roll over ---- */
-.rollover-progress { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 10px 0; }
-.rollover-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin: 8px 0; }
-.rollover-card-title { font-weight: 600; margin-bottom: 8px; }
-.card-status { color: var(--muted); font-size: 12px; }
-.rollover-push { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
-.rollover-push .inp { min-width: 130px; }
-.rollover-push .field-label { margin: 0; }
 .rollover-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
-.rollover-done { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin: 8px 0; }
 
 /* ---- misc ---- */
 .loading { padding: 30px; color: var(--muted); }

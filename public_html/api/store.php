@@ -5,17 +5,16 @@
  *
  * Data shape:
  *   { "<PROJECT_ID>": {
- *       "sprints":   [ {name, startDate, endDate, closed}, ... ],
- *       "snapshots": [ {id, sprint, repo, number, title, points, url,
- *                       assignees:[{login,name,avatarUrl}], pushedTo, createdAt}, ... ],
+ *       "sprints":   [ {name, startDate, endDate, archived?}, ... ],
+ *       "archives":  [ {id, sprint, startDate, endDate, archivedAt, completedPoints,
+ *                       cancelledPoints, issues:[{repo, number, title, points, url, assignees}]}, ... ],
  *       "timelineMilestones": [ {id, title, date, color}, ... ]
  *   } }
  *
  * Issue->sprint membership is NOT stored here — it's derived from each issue's
  * due date (the sprint whose date window contains it; see sprint_for_date()).
- * This file holds sprint metadata plus "snapshots": website-only frozen copies
- * of issues that were pushed out of a (now closed) sprint, shown read-only in
- * that sprint's Cancelled/Pushed column, and the Timeline's milestone markers.
+ * This file holds sprint metadata, archived sprint records (finished issues and
+ * points saved by the site) and the Timeline's milestone markers.
  */
 declare(strict_types=1);
 require_once __DIR__ . '/gh.php';
@@ -165,7 +164,6 @@ function sprints_plan_missing(array $sprints, DateTimeImmutable $today): array
             'name'      => $name,
             'startDate' => $start->format('Y-m-d'),
             'endDate'   => $start->modify('+' . (SPRINT_LENGTH_DAYS - 1) . ' days')->format('Y-m-d'),
-            'closed'    => false,
         ];
         $start = $start->modify('+' . SPRINT_LENGTH_DAYS . ' days');
     }
@@ -211,6 +209,32 @@ function sprint_for_date(array $sprints, ?string $date): ?string
         }
     }
     return $best['name'] ?? null;
+}
+
+/** Sprints still shown on the board (archived ones are kept in the store but hidden). */
+function sprints_visible(array $sprints): array
+{
+    return array_values(array_filter($sprints, fn($s) => empty($s['archived'])));
+}
+
+/** Archived sprint records (finished issues + points, kept by the site). */
+function archives_get(string $projectId): array
+{
+    return store_list_get($projectId, 'archives');
+}
+
+/** "owner/repo#number" keys of every issue saved in an archive (hidden from the board). */
+function archived_issue_keys(array $archives): array
+{
+    $keys = [];
+    foreach ($archives as $a) {
+        foreach (($a['issues'] ?? []) as $i) {
+            if (!empty($i['repo']) && isset($i['number'])) {
+                $keys[$i['repo'] . '#' . $i['number']] = true;
+            }
+        }
+    }
+    return $keys;
 }
 
 /** Timeline milestones (website-only date markers) for a project. */
@@ -281,20 +305,4 @@ function roster_mutate(string $projectId, callable $fn): array
     fclose($fp);
 
     return $new;
-}
-
-/** Read the website-only snapshots for a project (read-only, no lock). */
-function snapshots_get(string $projectId): array
-{
-    return store_list_get($projectId, 'snapshots');
-}
-
-/**
- * Read-modify-write the snapshots array for a project under an exclusive lock.
- * $fn receives the current snapshots array and must return the new one.
- * Preserves the sibling "sprints" key untouched.
- */
-function snapshots_mutate(string $projectId, callable $fn): array
-{
-    return store_list_mutate($projectId, 'snapshots', $fn);
 }
